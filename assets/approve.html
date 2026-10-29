@@ -1,0 +1,24 @@
+<!doctype html><html lang="en"><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; connect-src 'self'; base-uri 'none'; form-action 'none'; frame-src 'none'">
+<meta name="referrer" content="no-referrer"><title>Soli owner review</title>
+<h1>Soli · Review live order</h1>
+<p>This page can submit a real Solana transaction. Verify wallet, mint, amounts and expiry.
+Enter the owner credential locally. It stays in this page's memory and is never sent to an AI agent.</p>
+<label>Owner credential <input id="token" type="password" autocomplete="off"></label>
+<button id="load">Load pending order</button>
+<pre id="details">No order loaded.</pre>
+<label><input id="confirm" type="checkbox"> I reviewed this exact order and authorize its execution.</label>
+<button id="execute" disabled>Execute reviewed order</button>
+<button id="forget">Forget credential</button>
+<p id="result" role="status"></p>
+<h2>Authorize automatic exits for an existing position</h2>
+<p>Off by default. This permits full-position sells when the reviewed strategy triggers
+stop loss, take profit or maximum hold time. The exact strategy is saved with the authorization.
+No automatic buys are authorized. Failed providers, an unresolved order or lost liquidity can delay an exit.</p>
+<label>Tracked mint <select id="mint"></select></label>
+<label>Authorization hours (1–168) <input id="hours" type="number" min="1" max="168" value="24"></label>
+<label><input id="exit-confirm" type="checkbox"> I authorize automatic exits under the strategy displayed above.</label>
+<button id="arm" disabled>Authorize automatic exits</button>
+<button id="disarm" disabled>Revoke automatic exits</button>
+<script src="/approve.js" defer></script></html>
