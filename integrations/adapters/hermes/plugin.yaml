@@ -1,0 +1,6 @@
+name: soli
+version: 0.1.0
+description: Optional Hermes registration shim for the standalone Soli Rust binary
+author: Soli
+requires_env:
+  - SOLI_BINARY
