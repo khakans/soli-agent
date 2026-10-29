@@ -10,7 +10,7 @@ exists, existing JSON configuration keeps working. Give engine and signer
 different OS accounts and SOLI_HOME directories. The binary does not load
 arbitrary `.env` files from a model's current working directory.
 
-Set `SOLI_SIGNING_BACKEND=local`, `SOLI_PRIVATE_KEY` to the Solana base58 seed or
+Set `SOLI_SIGNING_BACKEND=local`, `SOLI_PRIVATE_KEY` to the Solana hex/base58 seed or
 keypair, and `SOLI_EXPECTED_WALLET` to the intended public address. A JSON
 keypair is also accepted when quoted correctly by the service manager. Never
 put the recovery phrase, private key, or owner token into Hermes or the engine.

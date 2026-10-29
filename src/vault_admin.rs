@@ -151,7 +151,13 @@ pub(crate) fn decode_solana_key(
     let key = if text.trim_start().starts_with('[') {
         serde_json::from_str::<Vec<u8>>(text)?
     } else {
-        bs58::decode(text.trim()).into_vec()?
+        let raw = text.trim();
+        let hex_key = raw.strip_prefix("0x").unwrap_or(raw);
+        if [64, 128].contains(&hex_key.len()) && hex_key.bytes().all(|c| c.is_ascii_hexdigit()) {
+            hex::decode(hex_key)?
+        } else {
+            bs58::decode(raw).into_vec()?
+        }
     };
     if ![32, 64].contains(&key.len()) {
         return Err("expected a 32-byte seed or 64-byte Solana keypair file".into());
@@ -165,6 +171,14 @@ mod tests {
     fn accepts_local_solana_key_formats_only() {
         assert!(decode_solana_key(&serde_json::to_string(&vec![1u8; 64]).unwrap()).is_ok());
         assert!(decode_solana_key(&bs58::encode([2u8; 32]).into_string()).is_ok());
+        assert_eq!(
+            &*decode_solana_key(&hex::encode([2u8; 32])).unwrap(),
+            &[2u8; 32]
+        );
+        assert_eq!(
+            &*decode_solana_key(&format!("0x{}", hex::encode([2u8; 64]))).unwrap(),
+            &[2u8; 64]
+        );
         assert!(decode_solana_key("[1,2,3]").is_err());
     }
 }

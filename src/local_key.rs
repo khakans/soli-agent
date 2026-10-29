@@ -15,7 +15,7 @@ impl LocalKey {
     }
     pub(crate) fn decode(text: &str, expected: &str) -> Result<Self, String> {
         let bytes = super::vault_admin::decode_solana_key(text).map_err(
-            |_| "invalid Solana private key; use base58 or JSON keypair, never a seed phrase",
+            |_| "invalid Solana private key; use hex, base58 or JSON keypair, never a seed phrase",
         )?;
         let seed: &[u8; 32] = bytes[..32].try_into().map_err(|_| "invalid seed length")?;
         let key = SigningKey::from_bytes(seed);
@@ -74,6 +74,15 @@ mod tests {
             .is_ok()
         );
         assert!(LocalKey::decode(&bs58::encode(seed).into_string(), "wrong wallet").is_err());
+        assert!(LocalKey::decode(&hex::encode(seed), &expected).is_ok());
+        assert!(
+            LocalKey::decode(
+                &format!("0x{}", hex::encode(key.to_keypair_bytes())),
+                &expected
+            )
+            .is_ok()
+        );
+        assert!(LocalKey::decode(&hex::encode(seed), "wrong wallet").is_err());
         assert!(
             LocalKey::decode(&serde_json::to_string(&vec![19; 64]).unwrap(), &expected).is_err()
         );
