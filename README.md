@@ -2,7 +2,7 @@
 
 Agent-independent Rust engine for **Solana spot memecoins**. Default: dry run.
 Connect an AI agent through native Rust MCP, HTTP tools or CLI; Hermes is an optional native
-adapter for **Slack, Telegram and Discord**. Vault-backed signing runs as a
+adapter for **Slack, Telegram and Discord**. Local `.env` or Vault-backed signing runs as a
 separate process. No wallets or credentials are included.
 
 **Installing from an agent? Read [INSTALL.md](INSTALL.md), then [SKILL.md](SKILL.md).**
@@ -27,7 +27,7 @@ before considering real funds.
 - SQLite paper ledger, idempotent quote-bound fills, independent exit/mark worker,
   liquidation-quote equity, drawdown halt, fee calibration and daily reports.
 - Live transaction decoding, program allowlist, wallet balance/authority simulation,
-  exact-order approval, Vault Ed25519 signature verification, preflight submission,
+  exact-order approval, Ed25519 signature verification, preflight submission,
   durable submission journal, finalization polling and restart reconciliation.
 - Live liquidation marks and exit recommendations. Live exits, like entries,
   require owner approval. Optional automatic exits use a separate expiring owner mandate.
@@ -123,6 +123,6 @@ cargo clippy --all-targets -- -D warnings
 ```
 
 Tests use mocked RPC/Jupiter/Vault HTTP with real Ed25519 signatures; no mainnet
-transactions are submitted. External provider credentials, the actual Vault
-deployment and installed Hermes transports require separate operator acceptance
+transactions are submitted. External provider credentials, actual signer custody
+and installed Hermes transports require separate operator acceptance
 tests. Building live support does not authorize deployment, funding or live trades.

@@ -5,6 +5,7 @@ use std::collections::BTreeMap;
 
 pub const TOKEN: &str = "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA";
 pub const TOKEN_2022: &str = "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb";
+pub const MAINNET_GENESIS: &str = "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d";
 pub type Result<T> = std::result::Result<T, String>;
 pub fn within_slippage(output: u64, minimum: u64) -> bool {
     output > 0
@@ -18,7 +19,7 @@ pub struct Data {
     pub http: reqwest::Client,
     pub rpc: String,
     pub jupiter_key: String,
-    pub goplus_token: Option<String>,
+    pub goplus: super::goplus::Auth,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Risk {
@@ -48,9 +49,7 @@ pub struct Sample {
 }
 impl Data {
     pub async fn check_fresh_chain(&self) -> Result<()> {
-        if self.rpc("getGenesisHash", json!([])).await?.as_str()
-            != Some("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
-        {
+        if self.rpc("getGenesisHash", json!([])).await?.as_str() != Some(MAINNET_GENESIS) {
             return Err("data RPC is not Solana mainnet".into());
         }
         let slot = self
@@ -58,11 +57,30 @@ impl Data {
             .await?
             .as_u64()
             .ok_or("missing current slot")?;
-        let stamp = self
-            .rpc("getBlockTime", json!([slot]))
-            .await?
-            .as_u64()
-            .ok_or("RPC block time unavailable")?;
+        let stamp = match self.rpc("getBlockTime", json!([slot])).await {
+            Ok(v) if v.as_u64().is_some() => v.as_u64().unwrap(),
+            _ => {
+                // A confirmed slot may be skipped or not yet indexed. Probe a
+                // recent produced block; the same 90-second freshness gate applies.
+                let end = slot.saturating_sub(8);
+                let blocks = self
+                    .rpc(
+                        "getBlocks",
+                        json!([slot.saturating_sub(32),end,{"commitment":"confirmed"}]),
+                    )
+                    .await?;
+                let produced = blocks
+                    .as_array()
+                    .and_then(|a| a.last())
+                    .and_then(Value::as_u64)
+                    .filter(|n| *n <= end && slot - *n <= 32)
+                    .ok_or("recent RPC block unavailable")?;
+                self.rpc("getBlockTime", json!([produced]))
+                    .await?
+                    .as_u64()
+                    .ok_or("RPC block time unavailable")?
+            }
+        };
         if super::now().abs_diff(stamp) > 90 {
             return Err("RPC data is stale; entries paused".into());
         }
@@ -76,7 +94,7 @@ impl Data {
                 .ok()
                 .filter(|s| !s.is_empty())?,
             jupiter_key: std::env::var("JUPITER_API_KEY").unwrap_or_default(),
-            goplus_token: std::env::var("GOPLUS_TOKEN").ok(),
+            goplus: super::goplus::Auth::from_env(),
         })
     }
     pub async fn rpc(&self, method: &str, params: Value) -> Result<Value> {
@@ -270,21 +288,7 @@ impl Data {
         if ten > 50.0 {
             reasons.push("top ten observed owners above 50% of supply".into());
         }
-        let mut request = self
-            .http
-            .get("https://api.gopluslabs.io/api/v1/solana/token_security")
-            .query(&[("contract_addresses", mint)]);
-        if let Some(token) = &self.goplus_token {
-            request = request.bearer_auth(token);
-        }
-        let response = request
-            .send()
-            .await
-            .map_err(|_| "GoPlus unavailable; no entry")?;
-        if !response.status().is_success() {
-            return Err("GoPlus HTTP failure; no entry".into());
-        }
-        let gp: Value = response.json().await.map_err(|_| "invalid GoPlus data")?;
+        let gp = self.goplus.security(&self.http, mint).await?;
         let security = gp["result"]
             .get(mint)
             .cloned()
@@ -358,6 +362,63 @@ fn authority_reasons(info: &Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    #[tokio::test]
+    async fn canonical_mainnet_rpc_is_accepted_and_other_networks_rejected() {
+        use axum::{Json, Router, routing::post};
+        for (genesis, accepted, skipped, age) in [
+            (
+                "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+                true,
+                false,
+                0,
+            ),
+            ("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp", false, false, 0),
+            ("EtWTRABZaYq6iMfeYKouRu166VU2xqa1", false, false, 0),
+            (
+                "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+                true,
+                true,
+                0,
+            ),
+            (
+                "5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d",
+                false,
+                true,
+                180,
+            ),
+        ] {
+            let app = Router::new().route(
+                "/",
+                post(move |Json(v): Json<Value>| async move {
+                    if skipped && v["method"] == "getBlockTime" && v["params"][0] == 123 {
+                        return Json(json!({"jsonrpc":"2.0","id":1,"error":{"code":-32004,"message":"block unavailable"}}));
+                    }
+                    let result = match v["method"].as_str().unwrap() {
+                        "getGenesisHash" => json!(genesis),
+                        "getSlot" => json!(123),
+                        "getBlockTime" => json!(crate::now()-age),
+                        "getBlocks" => json!([114]),
+                        _ => panic!("unexpected RPC method"),
+                    };
+                    Json(json!({"jsonrpc":"2.0","id":1,"result":result}))
+                }),
+            );
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let rpc = format!("http://{}", listener.local_addr().unwrap());
+            let task = tokio::spawn(async move {
+                axum::serve(listener, app).await.unwrap();
+            });
+            let data = Data {
+                http: reqwest::Client::builder().no_proxy().build().unwrap(),
+                rpc,
+                jupiter_url: String::new(),
+                jupiter_key: String::new(),
+                goplus: crate::goplus::Auth::from_env(),
+            };
+            assert_eq!(data.check_fresh_chain().await.is_ok(), accepted);
+            task.abort();
+        }
+    }
     #[test]
     fn slippage_floor_is_verified_including_large_atomic_amounts() {
         assert!(super::within_slippage(1_000_000, 990_000));

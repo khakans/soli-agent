@@ -1,5 +1,32 @@
 # Local setup and live acceptance
 
+## Local private-key mode (.env)
+
+Copy `.env.example` or `config/signer.env.example` to the isolated signer's
+private `SOLI_HOME/.env` (Unix directory 0700, file 0600). Native `run signer`
+loads that file; `configure NAME signer` updates it through hidden input.
+It takes precedence over legacy JSON profiles in that directory. If no `.env`
+exists, existing JSON configuration keeps working. Give engine and signer
+different OS accounts and SOLI_HOME directories. The binary does not load
+arbitrary `.env` files from a model's current working directory.
+
+Set `SOLI_SIGNING_BACKEND=local`, `SOLI_PRIVATE_KEY` to the Solana base58 seed or
+keypair, and `SOLI_EXPECTED_WALLET` to the intended public address. A JSON
+keypair is also accepted when quoted correctly by the service manager. Never
+put the recovery phrase, private key, or owner token into Hermes or the engine.
+Private keys in `.env` are plaintext on disk; the service-account permissions
+provide access control, not encryption. `.env` is ignored by Git.
+
+With the signer's SOLI_HOME, run `soli-agent wallet-check` to derive
+the public address and verify a random non-transaction signature. This works
+while dry run remains true. A mismatched address, malformed key, or inconsistent
+64-byte keypair is rejected. Live startup still requires explicit false, valid
+provider configuration, separate accounts, owner token, caps, and strategy.
+Both local and Vault signatures go through the same transaction decoder,
+simulation policy, spending/slippage limits, approval, journal and reconciliation.
+Local mode does not authorize automatic entries or remove exact-owner approval.
+The local signing process has no dependency on Vault or unseal operations.
+
 ## Service boundary
 
 Run `soli-agent serve` as an engine user on 127.0.0.1:8787.
@@ -16,8 +43,9 @@ Do not deploy the connector into a shared unrestricted-shell agent profile.
 
 `SOLI_DRY_RUN=false` is required explicitly for the signer and engine live proxy.
 Engine live startup checks signer availability/authentication. Starting with
-missing Vault/RPC/Jupiter settings, wrong network, exportable/derived key, or sealed
-Vault fails closed. Do not fund a wallet merely because `/health` responds.
+missing custody/RPC/Jupiter settings or the wrong network fails closed. Vault mode
+also rejects exportable/derived keys and a sealed Vault. Do not fund a wallet
+merely because `/health` responds.
 
 ## Vault
 
@@ -100,7 +128,7 @@ wallets on an existing database.
 2. Review wallet, mint, amount, minimum output, cost cap, digest and expiry.
 3. Approve exact ID/digest in the same verified platform/chat/thread, or use
    owner-only CLI `live-execute ORDER_ID DIGEST CONFIRM`.
-4. Re-simulate exact transaction, check blockhash, sign in Vault, verify signature.
+4. Re-simulate exact transaction, check blockhash, sign with the explicitly configured backend, verify signature.
 5. Persist signature and submitted intent BEFORE broadcast. Preflight remains on.
 6. Poll finalized receipt. Unknown outcomes block all new orders; do not erase
    journal data to force retry. `live-reconcile` checks the same signature.
@@ -112,7 +140,9 @@ it does not liquidate positions. Live exits require fresh approval unless the ow
 
 ## Seal, restart and recovery
 
-- Vault sealed/unavailable: signing fails, no fallback local private key is used.
+- Vault mode sealed/unavailable: signing fails, no fallback local private key is used.
+- Local mode: protect the private `.env` and owner credential separately. Restart
+  requires the same key; a mismatched expected address or journal wallet is rejected.
 - Signer restart: pending signature survives and finalization polling resumes.
 - Engine/Hermes restart: signing authority does not move into those processes.
 - Missing finalized receipt: remain unresolved; investigate with another trusted

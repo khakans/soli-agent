@@ -19,6 +19,7 @@ solana-message = { version = "6", features = ["wincode"] }
 solana-pubkey = "4.4"
 solana-signature = { version = "3.6", features = ["verify"] }
 sha2 = "0.10"
+sha1 = "0.10"
 hmac = "0.12"
 hex = "0.4"
 chrono = { version = "0.4", features = ["serde"] }
@@ -29,6 +30,7 @@ tempfile = "3"
 zeroize = "1"
 rmcp = { version = "3.8", features = ["transport-io", "client", "transport-child-process"] }
 rpassword = "7"
+dotenvy = "0.15"
 toml_edit = "0.25"
 sysinfo = "0.37"
 self-replace = "1.5"

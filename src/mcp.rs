@@ -166,7 +166,7 @@ pub async fn verify(path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
         n.starts_with("SOLI_")
             || n.starts_with("VAULT_")
             || n == "JUPITER_API_KEY"
-            || n == "GOPLUS_TOKEN"
+            || n.starts_with("GOPLUS_")
     }) {
         command.env_remove(name);
     }

@@ -22,7 +22,13 @@ pub async fn inspect(State(app): State<App>) -> ApiResult {
         }
         .await;
         checks.insert("jupiter_two_way_quotes".into(), outcome(routes));
-        let coverage = data.risk(mint).await.map(|_| ());
+        // Native wrapped SOL reports zero mint supply; it is a route probe,
+        // not a valid holder-concentration fixture. BONK is a read-only probe;
+        // base USDC is deliberately excluded from the engine's target-mint API.
+        let coverage = data
+            .risk("DezXAZ8z7PnrnRJjz3wXBoRgixCa6xjnB7YaB1pPB263")
+            .await
+            .map(|_| ());
         checks.insert("goplus_and_chain_response".into(), outcome(coverage));
     } else {
         checks.insert(

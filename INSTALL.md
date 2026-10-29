@@ -60,6 +60,8 @@ soli-agent configure SOLI_RPC_URL
 soli-agent configure SOLI_WS_URL
 soli-agent configure JUPITER_API_KEY
 soli-agent configure GOPLUS_TOKEN
+soli-agent configure GOPLUS_APP_KEY
+soli-agent configure GOPLUS_APP_SECRET
 soli-agent configure SOLI_SMART_WALLETS
 soli-agent stop engine
 soli-agent start engine
@@ -70,6 +72,20 @@ Blank input removes a setting. GoPlus token is optional when anonymous access is
 permitted. Provider acceptance checks fresh mainnet RPC, WS subscription, Jupiter
 routes and GoPlus/on-chain response coverage, saving `.soli/readiness.json`.
 Missing credentials produce failed acceptance. Paper evidence is `/v1/performance`.
+For GoPlus App Key + App Secret, configure both `GOPLUS_APP_KEY` and
+`GOPLUS_APP_SECRET` instead of a manual token. Soli obtains and caches access
+tokens in memory, refreshes before expiry and retries authentication once on
+HTTP 401/403. Partial app credentials fail closed. No token is logged or saved
+to disk. Restart the engine after configuration. The signer must receive its
+own provider configuration under its private service account.
+
+For `.env` configuration, copy `.env.example` into the private `SOLI_HOME/.env`,
+set mode 0600 on Unix, and fill it locally. Native lifecycle commands prefer
+that file over legacy JSON profiles; `configure` updates whichever format is
+active. Keep the signer in a separate SOLI_HOME and account. Local wallet mode
+uses `SOLI_SIGNING_BACKEND=local`, `SOLI_PRIVATE_KEY` and
+`SOLI_EXPECTED_WALLET`; run `soli-agent wallet-check` under the signer account
+to verify without starting live trading. See [operations](docs/operations.md).
 
 ## Services and delivery
 
@@ -98,9 +114,10 @@ services and registered Soli host entries, preserving journals, credentials and 
 
 ## Live and optional adapters
 
-Read [operations](docs/operations.md). The signer needs a different OS account,
-private state and Vault access. Keep model hosts away from both service profiles.
-Live startup checks account separation, matching strategy, Vault signatures and
+Read [operations](docs/operations.md). The signer needs a different OS account
+and private state. Choose local key custody in its private `.env`, or Vault
+Transit. Keep model hosts away from both service profiles.
+Live startup checks account separation, matching strategy, signing compatibility and
 provider acceptance. The owner reviews orders at the signer's loopback `/approve`
 page. Optional automatic exits require a separate expiring authorization for an
 existing position and saved strategy. They are off by default.

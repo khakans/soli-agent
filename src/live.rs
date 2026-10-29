@@ -135,10 +135,12 @@ pub struct Live {
     rpc: String,
     jupiter: String,
     jupiter_url: String,
+    goplus: super::goplus::Auth,
     vault: String,
     vault_token: String,
     key: String,
     key_version: u64,
+    local_key: Option<super::local_key::LocalKey>,
     wallet: String,
     owner_token: String,
     agent_token: String,
@@ -151,8 +153,25 @@ pub struct Live {
 impl Live {
     pub async fn connect(path: &std::path::Path, general_token: &str) -> Result<Arc<Self>> {
         let rpc = env("SOLI_RPC_URL")?;
-        let vault = env("VAULT_ADDR")?;
-        for url in [&rpc, &vault] {
+        let backend = std::env::var("SOLI_SIGNING_BACKEND").unwrap_or_else(|_| "vault".into());
+        let local_key = match backend.as_str() {
+            "local" => Some(super::local_key::LocalKey::from_env()?),
+            "vault" => {
+                if std::env::var("SOLI_PRIVATE_KEY").is_ok_and(|s| !s.is_empty()) {
+                    return Err(
+                        "local private key must not be supplied to the Vault backend".into(),
+                    );
+                }
+                None
+            }
+            _ => return Err("SOLI_SIGNING_BACKEND must be local or vault".into()),
+        };
+        let vault = if local_key.is_none() {
+            env("VAULT_ADDR")?
+        } else {
+            String::new()
+        };
+        for url in [&rpc, &vault].into_iter().filter(|s| !s.is_empty()) {
             let u = reqwest::Url::parse(url).map_err(|_| "invalid service URL")?;
             if u.scheme() != "https"
                 && !(u.scheme() == "http"
@@ -168,10 +187,15 @@ impl Live {
                     .into(),
             );
         }
-        let key = env("VAULT_TRANSIT_KEY")?;
-        if !key
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+        let key = if local_key.is_none() {
+            env("VAULT_TRANSIT_KEY")?
+        } else {
+            String::new()
+        };
+        if local_key.is_none()
+            && !key
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
         {
             return Err("invalid Vault key name".into());
         }
@@ -192,42 +216,48 @@ impl Live {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|_| "HTTP client initialization failed")?;
-        let vault_token = env("VAULT_TOKEN")?;
-        let response = http
-            .get(format!(
-                "{}/v1/transit/keys/{key}",
-                vault.trim_end_matches('/')
-            ))
-            .header("X-Vault-Token", &vault_token)
-            .send()
-            .await
-            .map_err(|_| "Vault unavailable")?;
-        if !response.status().is_success() {
-            return Err("Vault key lookup rejected".into());
-        }
-        let data: Value = response
-            .json()
-            .await
-            .map_err(|_| "invalid Vault response")?;
-        let d = &data["data"];
-        if d["type"] != "ed25519"
-            || d["exportable"] != false
-            || d["allow_plaintext_backup"] != false
-            || d["derived"] != false
-        {
-            return Err("Vault requires non-derived, non-exportable Ed25519 key with plaintext backup disabled".into());
-        }
-        let key_version = d["latest_version"]
-            .as_u64()
-            .ok_or("missing Vault key version")?;
-        let public = d["keys"][key_version.to_string()]["public_key"]
-            .as_str()
-            .ok_or("missing Vault public key")?;
-        let bytes = B64.decode(public).map_err(|_| "invalid Vault public key")?;
-        if bytes.len() != 32 {
-            return Err("invalid Ed25519 public key length".into());
-        }
-        let wallet = bs58::encode(bytes).into_string();
+        let (vault_token, key_version, wallet) = if let Some(local) = &local_key {
+            local.verify()?;
+            (String::new(), 0, local.wallet())
+        } else {
+            let vault_token = env("VAULT_TOKEN")?;
+            let response = http
+                .get(format!(
+                    "{}/v1/transit/keys/{key}",
+                    vault.trim_end_matches('/')
+                ))
+                .header("X-Vault-Token", &vault_token)
+                .send()
+                .await
+                .map_err(|_| "Vault unavailable")?;
+            if !response.status().is_success() {
+                return Err("Vault key lookup rejected".into());
+            }
+            let data: Value = response
+                .json()
+                .await
+                .map_err(|_| "invalid Vault response")?;
+            let d = &data["data"];
+            if d["type"] != "ed25519"
+                || d["exportable"] != false
+                || d["allow_plaintext_backup"] != false
+                || d["derived"] != false
+            {
+                return Err("Vault requires non-derived, non-exportable Ed25519 key with plaintext backup disabled".into());
+            }
+            let key_version = d["latest_version"]
+                .as_u64()
+                .ok_or("missing Vault key version")?;
+            let public = d["keys"][key_version.to_string()]["public_key"]
+                .as_str()
+                .ok_or("missing Vault public key")?;
+            let bytes = B64.decode(public).map_err(|_| "invalid Vault public key")?;
+            if bytes.len() != 32 {
+                return Err("invalid Ed25519 public key length".into());
+            }
+            let wallet = bs58::encode(bytes).into_string();
+            (vault_token, key_version, wallet)
+        };
         let connection = Connection::open(path).map_err(|_| "cannot open live journal")?;
         connection.execute_batch("CREATE TABLE IF NOT EXISTS live_journal(id INTEGER PRIMARY KEY CHECK(id=1),data TEXT NOT NULL);").map_err(|_|"cannot create live journal")?;
         connection
@@ -253,10 +283,12 @@ impl Live {
             rpc,
             jupiter: env("JUPITER_API_KEY")?,
             jupiter_url: "https://api.jup.ag/swap/v2/order".into(),
+            goplus: super::goplus::Auth::from_env(),
             vault: vault.trim_end_matches('/').into(),
             vault_token,
             key,
             key_version,
+            local_key,
             wallet,
             owner_token,
             agent_token: general_token.into(),
@@ -269,16 +301,18 @@ impl Live {
             }),
         });
         if live.rpc("getGenesisHash", json!([])).await?.as_str()
-            != Some("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp")
+            != Some(super::data::MAINNET_GENESIS)
         {
             return Err("RPC is not Solana mainnet-beta".into());
         }
         live.db.lock().await.save()?;
         live.data().check_fresh_chain().await?;
         // Sign a domain-separated compatibility challenge, never a transaction, at startup.
-        super::vault_admin::command(&["vault-key".into(), "verify".into(), live.key.clone()])
-            .await
-            .map_err(|_| "live startup blocked: Vault Ed25519 signing probe failed")?;
+        if live.local_key.is_none() {
+            super::vault_admin::command(&["vault-key".into(), "verify".into(), live.key.clone()])
+                .await
+                .map_err(|_| "live startup blocked: Vault Ed25519 signing probe failed")?;
+        }
         Ok(live)
     }
 
@@ -461,28 +495,31 @@ impl Live {
 
     async fn sign(&self, tx: &mut VersionedTransaction) -> Result<String> {
         let message = tx.message.serialize();
-        let r=self.http.post(format!("{}/v1/transit/sign/{}",self.vault,self.key)).header("X-Vault-Token",&self.vault_token)
+        let sig = if let Some(local) = &self.local_key {
+            local.sign(&message)
+        } else {
+            let r=self.http.post(format!("{}/v1/transit/sign/{}",self.vault,self.key)).header("X-Vault-Token",&self.vault_token)
             .json(&json!({"input":B64.encode(&message),"key_version":self.key_version,"prehashed":false})).send().await.map_err(|_|"Vault signing unavailable")?;
-        if !r.status().is_success() {
-            return Err("Vault signing rejected".into());
-        }
-        let v: Value = r.json().await.map_err(|_| "invalid signing response")?;
-        let encoded = v["data"]["signature"]
-            .as_str()
-            .ok_or("missing Vault signature")?;
-        let prefix = format!("vault:v{}:", self.key_version);
-        let sig = B64
-            .decode(
+            if !r.status().is_success() {
+                return Err("Vault signing rejected".into());
+            }
+            let v: Value = r.json().await.map_err(|_| "invalid signing response")?;
+            let encoded = v["data"]["signature"]
+                .as_str()
+                .ok_or("missing Vault signature")?;
+            let prefix = format!("vault:v{}:", self.key_version);
+            B64.decode(
                 encoded
                     .strip_prefix(&prefix)
                     .ok_or("unexpected signing key version")?,
             )
-            .map_err(|_| "invalid Vault signature encoding")?;
+            .map_err(|_| "invalid Vault signature encoding")?
+        };
         let signature =
             Signature::try_from(sig.as_slice()).map_err(|_| "invalid signature size")?;
         let pk = Pubkey::from_str(&self.wallet).map_err(|_| "invalid wallet")?;
         if !signature.verify(pk.as_ref(), &message) {
-            return Err("Vault signature verification failed".into());
+            return Err("signer signature verification failed".into());
         }
         tx.signatures[0] = signature;
         tx.verify_and_hash_message()
@@ -498,7 +535,7 @@ impl Live {
             http: self.http.clone(),
             rpc: self.rpc.clone(),
             jupiter_key: self.jupiter.clone(),
-            goplus_token: std::env::var("GOPLUS_TOKEN").ok(),
+            goplus: self.goplus.clone(),
         }
     }
     async fn refresh_marks(&self) -> Result<()> {
@@ -1688,6 +1725,12 @@ mod tests {
         )
     }
     async fn fixture(timeout: bool) -> (Arc<Live>, Mock, tokio::task::JoinHandle<()>) {
+        fixture_backend(timeout, false).await
+    }
+    async fn fixture_backend(
+        timeout: bool,
+        local: bool,
+    ) -> (Arc<Live>, Mock, tokio::task::JoinHandle<()>) {
         let signer = Arc::new(ed25519_dalek::SigningKey::from_bytes(&[42u8; 32]));
         let wallet = bs58::encode(signer.verifying_key().to_bytes()).into_string();
         let mint = Pubkey::new_from_array([8; 32]).to_string();
@@ -1762,10 +1805,22 @@ mod tests {
             rpc: format!("{url}/rpc"),
             jupiter: "test-key".into(),
             jupiter_url: format!("{url}/order"),
+            goplus: super::super::goplus::Auth::from_env(),
             vault: url,
             vault_token: "test-vault".into(),
             key: "soli".into(),
             key_version: 1,
+            local_key: if local {
+                Some(
+                    super::super::local_key::LocalKey::decode(
+                        &bs58::encode([42u8; 32]).into_string(),
+                        &wallet,
+                    )
+                    .unwrap(),
+                )
+            } else {
+                None
+            },
             wallet,
             owner_token: "owner-only-test-token-012345678901".into(),
             agent_token: "agent-test-token-01234567890123456".into(),
@@ -1781,56 +1836,58 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn live_preview_vault_signature_broadcast_finalize_and_replay() {
-        let (l, m, handle) = fixture(false).await;
-        let p = preview(
-            State(l.clone()),
-            Json(PreviewRequest {
-                side: "buy".into(),
-                mint: m.mint.clone(),
-                amount: 1_000_000,
-            }),
-        )
-        .await
-        .unwrap()
-        .0;
-        let approval = || Approval {
-            order_id: p["order_id"].as_str().unwrap().into(),
-            digest: p["digest"].as_str().unwrap().into(),
-            confirm: true,
-        };
-        let mut wrong = approval();
-        wrong.digest = "wrong".into();
-        assert!(execute(State(l.clone()), Json(wrong)).await.is_err());
-        assert_eq!(m.sends.load(Ordering::SeqCst), 0);
-        let response = execute(State(l.clone()), Json(approval())).await.unwrap().0;
-        assert_eq!(response["state"], "submitted");
-        assert!(execute(State(l.clone()), Json(approval())).await.is_err());
-        assert_eq!(
-            reconcile(State(l.clone())).await.unwrap().0["state"],
-            "unresolved"
-        );
-        m.finalized.store(true, Ordering::SeqCst);
-        assert_eq!(
-            reconcile(State(l.clone())).await.unwrap().0["state"],
-            "finalized"
-        );
-        assert_eq!(
-            execute(State(l.clone()), Json(approval())).await.unwrap().0["state"],
-            "finalized"
-        );
-        assert_eq!(m.sends.load(Ordering::SeqCst), 1);
-        let db = l.db.lock().await;
-        assert_eq!(db.journal.spent, 1_000_000);
-        assert!(db.journal.positions.contains_key(&m.mint));
-        let saved: String = db
-            .connection
-            .query_row("SELECT data FROM live_journal WHERE id=1", [], |r| r.get(0))
-            .unwrap();
-        let restored: Journal = serde_json::from_str(&saved).unwrap();
-        assert!(restored.pending.is_none());
-        assert_eq!(restored.completed.len(), 1);
-        handle.abort();
+    async fn live_preview_both_signers_broadcast_finalize_and_replay() {
+        for local in [false, true] {
+            let (l, m, handle) = fixture_backend(false, local).await;
+            let p = preview(
+                State(l.clone()),
+                Json(PreviewRequest {
+                    side: "buy".into(),
+                    mint: m.mint.clone(),
+                    amount: 1_000_000,
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            let approval = || Approval {
+                order_id: p["order_id"].as_str().unwrap().into(),
+                digest: p["digest"].as_str().unwrap().into(),
+                confirm: true,
+            };
+            let mut wrong = approval();
+            wrong.digest = "wrong".into();
+            assert!(execute(State(l.clone()), Json(wrong)).await.is_err());
+            assert_eq!(m.sends.load(Ordering::SeqCst), 0);
+            let response = execute(State(l.clone()), Json(approval())).await.unwrap().0;
+            assert_eq!(response["state"], "submitted");
+            assert!(execute(State(l.clone()), Json(approval())).await.is_err());
+            assert_eq!(
+                reconcile(State(l.clone())).await.unwrap().0["state"],
+                "unresolved"
+            );
+            m.finalized.store(true, Ordering::SeqCst);
+            assert_eq!(
+                reconcile(State(l.clone())).await.unwrap().0["state"],
+                "finalized"
+            );
+            assert_eq!(
+                execute(State(l.clone()), Json(approval())).await.unwrap().0["state"],
+                "finalized"
+            );
+            assert_eq!(m.sends.load(Ordering::SeqCst), 1);
+            let db = l.db.lock().await;
+            assert_eq!(db.journal.spent, 1_000_000);
+            assert!(db.journal.positions.contains_key(&m.mint));
+            let saved: String = db
+                .connection
+                .query_row("SELECT data FROM live_journal WHERE id=1", [], |r| r.get(0))
+                .unwrap();
+            let restored: Journal = serde_json::from_str(&saved).unwrap();
+            assert!(restored.pending.is_none());
+            assert_eq!(restored.completed.len(), 1);
+            handle.abort();
+        }
     }
     #[tokio::test]
     async fn uncertain_broadcast_is_journaled_and_never_blindly_retried() {

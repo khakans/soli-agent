@@ -145,7 +145,9 @@ pub async fn command(args: &[String]) -> Result<(), Box<dyn std::error::Error>> 
     );
     Ok(())
 }
-fn decode_solana_key(text: &str) -> Result<Zeroizing<Vec<u8>>, Box<dyn std::error::Error>> {
+pub(crate) fn decode_solana_key(
+    text: &str,
+) -> Result<Zeroizing<Vec<u8>>, Box<dyn std::error::Error>> {
     let key = if text.trim_start().starts_with('[') {
         serde_json::from_str::<Vec<u8>>(text)?
     } else {

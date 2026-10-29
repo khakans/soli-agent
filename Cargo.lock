@@ -462,6 +462,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "dotenvy"
+version = "0.15.7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1aaf95b3e5c8f23aa320147307562d361db0ae0d51242340f558153b4eb2439b"
+
+[[package]]
 name = "dyn-clone"
 version = "1.0.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2064,6 +2070,7 @@ dependencies = [
  "base64 0.22.1",
  "bs58",
  "chrono",
+ "dotenvy",
  "ed25519-dalek",
  "futures-util",
  "hex",
@@ -2075,6 +2082,7 @@ dependencies = [
  "self-replace",
  "serde",
  "serde_json",
+ "sha1",
  "sha2 0.10.9",
  "solana-instruction",
  "solana-message",

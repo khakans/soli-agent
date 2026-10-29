@@ -3,8 +3,10 @@ mod access;
 mod bridge;
 mod connector;
 mod data;
+mod goplus;
 mod jupiter_wire;
 mod live;
+mod local_key;
 mod mcp;
 mod notify;
 mod operator;
@@ -331,6 +333,14 @@ async fn market(State(app): State<App>, Path(mint): Path<String>) -> ApiResult {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "verify-local-wallet") {
+        return local_key::check().map_err(Into::into);
+    }
+    if args.first().is_none_or(|a| a != "signer")
+        && std::env::var("SOLI_PRIVATE_KEY").is_ok_and(|s| !s.is_empty())
+    {
+        return Err("SOLI_PRIVATE_KEY is only permitted in the isolated signer process".into());
+    }
     if args.first().is_some_and(|a| a == "check-signer") {
         return acceptance::signer(args.iter().any(|a| a == "--expect-startup-failure")).await;
     }

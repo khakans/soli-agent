@@ -2,6 +2,44 @@
 use serde_json::{Value, json};
 use std::{path::PathBuf, process::Command};
 struct Cleanup(PathBuf);
+#[test]
+fn native_wallet_check_reads_private_env_without_live_startup() {
+    let root = tempfile::tempdir().unwrap();
+    let home = root.path();
+    std::fs::create_dir(home.join("bin")).unwrap();
+    let binary = home.join("bin").join(if cfg!(windows) {
+        "soli-agent.exe"
+    } else {
+        "soli-agent"
+    });
+    std::fs::copy(env!("CARGO_BIN_EXE_soli-agent"), binary).unwrap();
+    let key = ed25519_dalek::SigningKey::from_bytes(&[17; 32]);
+    let wallet = bs58::encode(key.verifying_key().to_bytes()).into_string();
+    let file = home.join(".env");
+    std::fs::write(
+        &file,
+        format!(
+            "SOLI_DRY_RUN=true\nSOLI_PRIVATE_KEY={}\nSOLI_EXPECTED_WALLET={wallet}\n",
+            bs58::encode([17; 32]).into_string()
+        ),
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
+    let result = Command::new(env!("CARGO_BIN_EXE_soli-agent"))
+        .arg("wallet-check")
+        .env("SOLI_HOME", home)
+        .output()
+        .unwrap();
+    assert!(result.status.success(), "wallet check failed");
+    let text = String::from_utf8(result.stdout).unwrap();
+    assert!(text.contains(&wallet));
+    assert!(!text.contains(&bs58::encode([17; 32]).into_string()));
+    assert!(!home.join("signer.pid.json").exists());
+}
 impl Drop for Cleanup {
     fn drop(&mut self) {
         let _ = Command::new(env!("CARGO_BIN_EXE_soli-agent"))

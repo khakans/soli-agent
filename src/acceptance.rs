@@ -25,7 +25,7 @@ pub async fn signer(sealed: bool) -> Result<(), Box<dyn std::error::Error>> {
             let seen = seen.clone();
             async move {
                 let result = match r["method"].as_str().unwrap_or("") {
-                    "getGenesisHash" => json!("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"),
+                    "getGenesisHash" => json!("5eykt4UsFv8P8NJdTREpY1vzqKqZKvdpKuc147dw2N9d"),
                     "getSlot" => json!(123),
                     "getBlockTime" => json!(crate::now()),
                     "getTokenAccountsByOwner" => json!({"value":[]}),

@@ -24,6 +24,7 @@ pub fn handles(cmd: &str) -> bool {
         "update",
         "uninstall",
         "notification-add",
+        "wallet-check",
     ]
     .contains(&cmd)
 }
@@ -38,7 +39,7 @@ pub fn home() -> Result<PathBuf> {
     }
     let exe = std::env::current_exe()?;
     if let Some(p) = exe.parent().and_then(Path::parent)
-        && p.join("engine.json").exists()
+        && (p.join("engine.json").exists() || p.join(".env").exists())
     {
         return Ok(p.into());
     }
@@ -157,9 +158,54 @@ fn add_agent(home: &Path, name: &str, role: &str, rotate: bool) -> Result<()> {
     Ok(())
 }
 fn profile(home: &Path, role: &str) -> Result<BTreeMap<String, String>> {
+    let path = home.join(".env");
+    if path.exists() || path.is_symlink() {
+        let meta = std::fs::symlink_metadata(&path)?;
+        if !meta.is_file() || meta.file_type().is_symlink() {
+            return Err(".env must be a regular private file".into());
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if meta.permissions().mode() & 0o077 != 0 {
+                return Err(".env must have mode 0600".into());
+            }
+        }
+        let mut settings = BTreeMap::new();
+        for entry in dotenvy::from_read_iter(std::fs::File::open(path)?) {
+            let (key, value) =
+                entry.map_err(|_| "invalid .env syntax; credential values suppressed")?;
+            if settings.insert(key, value).is_some() {
+                return Err("duplicate setting in .env".into());
+            }
+        }
+        return Ok(settings);
+    }
     Ok(serde_json::from_value(load(
         &home.join(format!("{role}.json")),
     )?)?)
+}
+fn save_profile(home: &Path, role: &str, settings: &BTreeMap<String, String>) -> Result<()> {
+    if home.join(".env").exists() {
+        let mut text = String::from("# Private Soli service settings. Never commit this file.\n");
+        for (key, value) in settings {
+            if !key.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'_')
+                || value.chars().any(char::is_control)
+            {
+                return Err("unsupported .env setting name or control character".into());
+            }
+            text.push_str(&format!(
+                "{key}={}\n",
+                serde_json::to_string(value)?.replace('$', "\\$")
+            ));
+        }
+        write(&home.join(".env"), text.as_bytes())
+    } else {
+        save(
+            &home.join(format!("{role}.json")),
+            &serde_json::to_value(settings)?,
+        )
+    }
 }
 pub fn service_environment(home: &Path) -> BTreeMap<std::ffi::OsString, std::ffi::OsString> {
     let mut env: BTreeMap<_, _> = std::env::vars_os()
@@ -168,31 +214,39 @@ pub fn service_environment(home: &Path) -> BTreeMap<std::ffi::OsString, std::ffi
             !k.starts_with("SOLI_")
                 && !k.starts_with("VAULT_")
                 && k != "JUPITER_API_KEY"
-                && k != "GOPLUS_TOKEN"
+                && !k.starts_with("GOPLUS_")
         })
         .collect();
     env.insert("SOLI_HOME".into(), home.as_os_str().to_owned());
     env
 }
 fn spawned(home: &Path, role: &str) -> Result<Command> {
+    spawned_command(
+        home,
+        role,
+        if role == "engine" { "serve" } else { "signer" },
+    )
+}
+fn spawned_command(home: &Path, role: &str, entrypoint: &str) -> Result<Command> {
     if !["engine", "signer"].contains(&role) {
         return Err("role must be engine or signer".into());
     }
     let mut c = Command::new(binary(home));
-    c.arg(if role == "engine" { "serve" } else { "signer" });
+    c.arg(entrypoint);
     for (name, _) in std::env::vars().filter(|(n, _)| {
         n.starts_with("SOLI_")
             || n.starts_with("VAULT_")
             || n == "JUPITER_API_KEY"
-            || n == "GOPLUS_TOKEN"
+            || n.starts_with("GOPLUS_")
     }) {
         c.env_remove(name);
     }
     let settings = profile(home, role)?;
     if role == "engine"
-        && settings
-            .keys()
-            .any(|k| k.starts_with("VAULT_") || k == "SOLI_OWNER_TOKEN")
+        && settings.iter().any(|(k, v)| {
+            !v.is_empty()
+                && (k.starts_with("VAULT_") || k == "SOLI_OWNER_TOKEN" || k == "SOLI_PRIVATE_KEY")
+        })
     {
         return Err("signer secrets must not be stored in the engine profile".into());
     }
@@ -532,6 +586,11 @@ pub async fn command(args: &[String]) -> Result<()> {
             .ok_or("missing command argument")
     };
     match args[0].as_str() {
+        "wallet-check" => run(&mut spawned_command(
+            &home,
+            "signer",
+            "verify-local-wallet",
+        )?)?,
         "install" => {
             std::fs::create_dir_all(&home)?;
             let resolved = home.canonicalize()?;
@@ -610,35 +669,42 @@ pub async fn command(args: &[String]) -> Result<()> {
             let name = arg(1)?;
             if !(name.starts_with("SOLI_")
                 || name.starts_with("VAULT_")
-                || ["JUPITER_API_KEY", "GOPLUS_TOKEN"].contains(&name))
+                || [
+                    "JUPITER_API_KEY",
+                    "GOPLUS_TOKEN",
+                    "GOPLUS_APP_KEY",
+                    "GOPLUS_APP_SECRET",
+                ]
+                .contains(&name))
             {
                 return Err("unsupported configuration name".into());
             }
             let role = args.get(2).map(String::as_str).unwrap_or("engine");
-            if role == "engine" && (name.starts_with("VAULT_") || name == "SOLI_OWNER_TOKEN") {
+            if role == "engine"
+                && (name.starts_with("VAULT_")
+                    || name == "SOLI_OWNER_TOKEN"
+                    || name == "SOLI_PRIVATE_KEY")
+            {
                 return Err("use the separate signer profile for signing credentials".into());
             }
             if !["engine", "signer"].contains(&role) {
                 return Err("role must be engine or signer".into());
             }
-            let file = home.join(format!("{role}.json"));
-            let mut profile = if file.exists() {
-                load(&file)?
-            } else {
-                json!({})
-            };
+            let mut settings =
+                if home.join(".env").exists() || home.join(format!("{role}.json")).exists() {
+                    profile(&home, role)?
+                } else {
+                    BTreeMap::new()
+                };
             let secret = zeroize::Zeroizing::new(rpassword::prompt_password(format!(
                 "{name} (local input, hidden): "
             ))?);
             if secret.is_empty() {
-                profile
-                    .as_object_mut()
-                    .ok_or("invalid profile")?
-                    .remove(name);
+                settings.remove(name);
             } else {
-                profile[name] = json!(secret.as_str());
+                settings.insert(name.into(), secret.to_string());
             }
-            save(&file, &profile)?;
+            save_profile(&home, role, &settings)?;
             println!("Saved privately; restart affected service to apply");
         }
         "notification-add" => {
@@ -659,9 +725,9 @@ pub async fn command(args: &[String]) -> Result<()> {
                 "SOLI_NOTIFY_{}",
                 name.replace('-', "_").to_ascii_uppercase()
             );
-            let mut profile = load(&home.join("engine.json"))?;
-            profile[&secret_env] = json!(secret.as_str());
-            save(&home.join("engine.json"), &profile)?;
+            let mut settings = profile(&home, "engine")?;
+            settings.insert(secret_env.clone(), secret.to_string());
+            save_profile(&home, "engine", &settings)?;
             let file = home.join("notifications.json");
             let mut all = load(&file)?
                 .as_array()
@@ -789,6 +855,29 @@ pub async fn command(args: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn private_env_roundtrip_precedence_and_engine_secret_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path();
+        save(&home.join("engine.json"), &json!({"SOLI_DRY_RUN":"false"})).unwrap();
+        write(
+            &home.join(".env"),
+            b"# explicit .env overrides legacy JSON\nSOLI_DRY_RUN=true\n",
+        )
+        .unwrap();
+        let mut values = profile(home, "engine").unwrap();
+        assert_eq!(values["SOLI_DRY_RUN"], "true");
+        values.insert(
+            "SOLI_OWNER_TOKEN".into(),
+            "a$literal # quote\" and slash\\".into(),
+        );
+        save_profile(home, "signer", &values).unwrap();
+        assert_eq!(profile(home, "signer").unwrap(), values);
+        assert!(spawned(home, "engine").is_err());
+        write(&home.join(".env"), b"BROKEN=\"never-print-this-secret\n").unwrap();
+        let e = profile(home, "signer").unwrap_err().to_string();
+        assert!(!e.contains("never-print"));
+    }
     #[test]
     fn scoped_native_configuration_preserves_other_host_settings() {
         let temp = tempfile::tempdir().unwrap();
