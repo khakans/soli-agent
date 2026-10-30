@@ -5,16 +5,19 @@ mod connector;
 mod data;
 mod goplus;
 mod jupiter_wire;
+mod learning;
 mod live;
 mod local_key;
 mod mcp;
 mod notify;
 mod operator;
+mod paper_cycle;
 mod proxy;
 mod readiness;
 mod research;
 mod signals;
 mod vault_admin;
+mod wallet;
 use axum::{
     Json, Router,
     extract::{Path, Request, State},
@@ -102,6 +105,17 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
     };
     let path = request.uri().path().to_owned();
     let method = request.method().to_string();
+    if identity != "operator"
+        && method == "POST"
+        && path == "/v1/paper/orders"
+        && paper_cycle::settings(&app).is_ok_and(|s| s.mode == "semi")
+    {
+        return error(
+            StatusCode::FORBIDDEN,
+            "semi mode requires owner paper-fill approval",
+        )
+        .into_response();
+    }
     let response = next.run(request).await;
     research::event(
         &app,
@@ -333,6 +347,13 @@ async fn market(State(app): State<App>, Path(mint): Path<String>) -> ApiResult {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args
+        .first()
+        .is_some_and(|a| ["menu", "soli-menu"].contains(&a.as_str()))
+    {
+        println!("{}", wallet::MENU);
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "verify-local-wallet") {
         return local_key::check().map_err(Into::into);
     }
@@ -476,6 +497,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut routes = Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/lifecycle", get(paper_cycle::status))
+        .route("/v1/lifecycle/control", post(paper_cycle::control))
+        .route("/v1/learning", get(learning::status))
+        .route("/v1/wallet", get(wallet::status))
+        .route("/v1/wallet/positions/{mint}", get(wallet::position))
+        .route("/v1/live/candidates", get(research::live_candidates))
         .route("/v1/market/{mint}", get(market))
         .route("/v1/paper/previews", post(preview))
         .route("/v1/paper/orders", post(order))
@@ -575,6 +602,14 @@ async fn client_command(token: &str, args: &[String]) -> Result<(), Box<dyn std:
     let base = "http://127.0.0.1:8787";
     let request = match args[0].as_str() {
         "status" if args.len() == 1 => http.get(format!("{base}/v1/status")),
+        "lifecycle" if args.len()==1=>http.get(format!("{base}/v1/lifecycle")),
+        "learning" if args.len()==1=>http.get(format!("{base}/v1/learning")),
+        "wallet"|"positions"|"pnl" if args.len()==1=>http.get(format!("{base}/v1/wallet")),
+        "position" if args.len()==2 && valid_mint(&args[1])=>http.get(format!("{base}/v1/wallet/positions/{}",args[1])),
+        "live-candidates" if args.len()==1=>http.get(format!("{base}/v1/live/candidates")),
+        "live-mode" if args.len()==5=>http.post(format!("{base}/v1/live/automation")).json(&json!({"mode":args[1],"expires_at":args[2].parse::<u64>()?,"entry_usdc":args[3].parse::<u64>()?,"strategy_hash":args[4]})),
+        "live-pause"|"live-resume-cycle" if args.len()==2=>http.post(format!("{base}/v1/live/pause")).json(&json!({"scope":args[1],"paused":args[0]=="live-pause"})),
+        "live-force-close" if args.len()==3 && args[2]=="CONFIRM"=>http.post(format!("{base}/v1/live/close")).json(&json!({"mint":args[1],"confirm":true})),
         "report" if args.len()==1=>http.get(format!("{base}/v1/report")),
         "daily" if args.len()==1=>http.get(format!("{base}/v1/reports/daily")),
         "calibrate" if args.len()==1=>http.post(format!("{base}/v1/fees/calibrate")),
@@ -594,7 +629,7 @@ async fn client_command(token: &str, args: &[String]) -> Result<(), Box<dyn std:
         _ => return Err("commands: serve | status | market MINT | preview buy|sell MINT ATOMIC_AMOUNT | paper-fill QUOTE_ID | halt | resume".into()),
     };
     let owner_token = if args[0].starts_with("live-")
-        && !["live-status", "live-preview"].contains(&args[0].as_str())
+        && !["live-status", "live-preview", "live-candidates"].contains(&args[0].as_str())
     {
         Some(
             std::env::var("SOLI_OWNER_TOKEN")

@@ -122,6 +122,7 @@ impl Strategy {
 }
 pub fn init(app: &App) -> Result<(), String> {
     let s = app.store.lock().map_err(|_| "store unavailable")?;
+    s.db.execute_batch("CREATE TABLE IF NOT EXISTS live_candidates(mint TEXT,strategy_hash TEXT,detected_at INTEGER,expires_at INTEGER,data TEXT,PRIMARY KEY(mint,strategy_hash));").map_err(|_|"live candidate schema failed")?;
     s.db.execute_batch("CREATE TABLE IF NOT EXISTS daily_reports(day INTEGER PRIMARY KEY,generated_at INTEGER,data TEXT NOT NULL);").map_err(|_|"daily report schema failed")?;
     s.db.execute_batch("CREATE TABLE IF NOT EXISTS samples(mint TEXT,ts INTEGER,data TEXT,PRIMARY KEY(mint,ts)); CREATE TABLE IF NOT EXISTS research_events(ts INTEGER,kind TEXT,data TEXT); CREATE TABLE IF NOT EXISTS equity(ts INTEGER PRIMARY KEY,cash INTEGER,liquidation INTEGER,equity INTEGER,complete INTEGER); CREATE TABLE IF NOT EXISTS strategy_versions(hash TEXT PRIMARY KEY,data TEXT);").map_err(|_|"research schema failed")?;
     s.db.execute(
@@ -133,6 +134,69 @@ pub fn init(app: &App) -> Result<(), String> {
     )
     .map_err(|_| "strategy snapshot failed")?;
     Ok(())
+}
+fn save_live_candidate(
+    db: &rusqlite::Connection,
+    mint: &str,
+    hash: &str,
+    source: &str,
+    amount: u64,
+    stamp: u64,
+    ttl: u64,
+) -> Result<(), String> {
+    let data = json!({"mint":mint,"strategy_hash":hash,"source":source,"amount_usdc_atomic":amount,"detected_at":stamp,"expires_at":stamp+ttl,"execution_requires_owner_approval":true,"next":"Request a fresh live buy preview, then review and approve its exact digest. A candidate is not an order."});
+    let tx = db
+        .unchecked_transaction()
+        .map_err(|_| "candidate transaction unavailable")?;
+    let changed=tx.execute("INSERT INTO live_candidates VALUES(?1,?2,?3,?4,?5) ON CONFLICT(mint,strategy_hash) DO UPDATE SET detected_at=excluded.detected_at,expires_at=excluded.expires_at,data=excluded.data WHERE live_candidates.expires_at<=?3",params![mint,hash,stamp,stamp+ttl,data.to_string()]).map_err(|_|"candidate persistence failed")?;
+    if changed > 0 {
+        crate::notify::enqueue(
+            &tx,
+            &format!("live-entry:{mint}:{hash}:{stamp}"),
+            "live_entry_candidate",
+            &data,
+        )?;
+    }
+    tx.execute(
+        "DELETE FROM live_candidates WHERE expires_at<?1",
+        [stamp.saturating_sub(604800)],
+    )
+    .map_err(|_| "candidate cleanup failed")?;
+    tx.commit().map_err(|_| "candidate commit failed".into())
+}
+pub fn live_candidate(app: &App, mint: &str, source: &str) -> Result<(), String> {
+    if !app.live_enabled {
+        return Ok(());
+    }
+    let s = app.store.lock().map_err(|_| "store unavailable")?;
+    save_live_candidate(
+        &s.db,
+        mint,
+        &app.strategy.fingerprint(),
+        source,
+        app.strategy.entry_usdc,
+        now(),
+        app.strategy.max_data_age_secs.clamp(1, 120),
+    )
+}
+pub async fn live_candidates(State(app): State<App>) -> ApiResult {
+    let s = app.store.lock().map_err(|_| bad("store unavailable"))?;
+    let mut q=s.db.prepare("SELECT data FROM live_candidates WHERE expires_at>?1 AND strategy_hash=?2 ORDER BY detected_at DESC LIMIT 100").map_err(|_|bad("candidate queue unavailable"))?;
+    let rows = q
+        .query_map(params![now(), app.strategy.fingerprint()], |r| {
+            r.get::<_, String>(0)
+        })
+        .map_err(|_| bad("candidate queue unavailable"))?;
+    let mut candidates = vec![];
+    for row in rows {
+        candidates.push(
+            serde_json::from_str::<Value>(&row.map_err(|_| bad("candidate read failed"))?)
+                .map_err(|_| bad("invalid candidate record"))?,
+        );
+    }
+    Ok(Json(
+        json!({"mode":if app.live_enabled{"live"}else{"dry_run"},"candidates":candidates,"execution":"isolated signer; exact approval in manual/semi, expiring strategy/amount mandate in full","owner_authorization_required":true}),
+    ))
 }
 pub fn event(app: &App, kind: &str, data: Value) {
     if let Ok(s) = app.store.lock() {
@@ -421,6 +485,7 @@ pub fn start(app: App) {
     }
 }
 async fn tick(app: &App, data: &Data) -> Result<(), String> {
+    let _ = crate::learning::review(app, true).await;
     if app.entry_trigger == "wallet_convergence" && !app.smart_wallets.is_empty() {
         crate::signals::tick(app, data).await?;
     }
@@ -444,8 +509,11 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
                 "entry_signal",
                 json!({"mint":mint,"accepted":risk.accepted,"risk":risk,"strategy_hash":app.strategy.fingerprint()}),
             );
+            if risk.accepted && app.entry_trigger == "momentum" {
+                live_candidate(app, mint, "momentum")?;
+            }
             if risk.accepted
-                && app.auto_paper
+                && crate::paper_cycle::entry(app)
                 && !app.live_enabled
                 && app.entry_trigger == "momentum"
             {
@@ -454,7 +522,7 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
                     Json(super::QuoteRequest {
                         side: "buy".into(),
                         mint: mint.clone(),
-                        amount: app.strategy.entry_usdc,
+                        amount: crate::paper_cycle::amount(app),
                     }),
                 )
                 .await;
@@ -476,7 +544,7 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
 async fn mark_and_exits(app: &App, data: &Data) -> Result<(), String> {
     if app.live_enabled {
         return Ok(());
-    } // Live entries/exits always require the owner's exact-order approval.
+    } // Live automation belongs to the isolated signer's owner-authorized worker.
     let ledger = {
         app.store
             .lock()
@@ -506,7 +574,7 @@ async fn mark_and_exits(app: &App, data: &Data) -> Result<(), String> {
                         "exit_signal",
                         json!({"mint":mint,"reason":reason,"liquidation_usdc":credit}),
                     );
-                    if app.auto_paper {
+                    if crate::paper_cycle::exit(app) {
                         let q = super::preview(
                             State(app.clone()),
                             Json(super::QuoteRequest {
@@ -607,6 +675,38 @@ async fn websocket(app: App, url: String, mints: Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_candidate_queue_is_durable_deduplicated_and_expires() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("candidates.db");
+        let db = rusqlite::Connection::open(&path).unwrap();
+        db.execute_batch("CREATE TABLE live_candidates(mint TEXT,strategy_hash TEXT,detected_at INTEGER,expires_at INTEGER,data TEXT,PRIMARY KEY(mint,strategy_hash));").unwrap();
+        save_live_candidate(&db, "mint", "hash", "momentum", 1000000, 100, 30).unwrap();
+        save_live_candidate(&db, "mint", "hash", "momentum", 9999999, 101, 30).unwrap();
+        let text: String = db
+            .query_row("SELECT data FROM live_candidates", [], |r| r.get(0))
+            .unwrap();
+        let data: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(data["amount_usdc_atomic"], 1000000);
+        drop(db);
+        let db = rusqlite::Connection::open(path).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT COUNT(*) FROM live_candidates WHERE expires_at>131",
+                [],
+                |r| r.get::<_, u64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        save_live_candidate(&db, "mint", "hash", "momentum", 2000000, 132, 30).unwrap();
+        assert_eq!(
+            db.query_row("SELECT detected_at FROM live_candidates", [], |r| r
+                .get::<_, u64>(0))
+                .unwrap(),
+            132
+        );
+    }
     use super::*;
     fn s(ts: u64, price: f64, vol: f64) -> Sample {
         Sample {

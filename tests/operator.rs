@@ -125,6 +125,71 @@ async fn native_install_scopes_revocation_and_restart() {
         .await
         .unwrap();
     assert_eq!(r["ready"], false);
+    // Model credentials can inspect controls, but cannot grant automation authority.
+    command(&["agent-add", "test", "paper"]);
+    assert_eq!(
+        http.post("http://127.0.0.1:8787/v1/paper/orders")
+            .bearer_auth(credential["token"].as_str().unwrap())
+            .json(&json!({"quote_id":"none"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        400
+    );
+    let control_url = "http://127.0.0.1:8787/v1/lifecycle/control";
+    let mode = json!({"action":"mode","args":["semi","24","1"]});
+    assert_eq!(
+        http.post(control_url)
+            .bearer_auth(credential["token"].as_str().unwrap())
+            .json(&mode)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let operator = profile["SOLI_API_TOKEN"].as_str().unwrap();
+    assert!(
+        http.post(control_url)
+            .bearer_auth(operator)
+            .json(&json!({"action":"mode","args":["full","169","1"]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        http.post(control_url)
+            .bearer_auth(operator)
+            .json(&mode)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    assert_eq!(
+        http.post("http://127.0.0.1:8787/v1/paper/orders")
+            .bearer_auth(credential["token"].as_str().unwrap())
+            .json(&json!({"quote_id":"none"}))
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert!(
+        http.post(control_url)
+            .bearer_auth(operator)
+            .json(&json!({"action":"pause","args":["all"]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     assert!(
         http.post("http://127.0.0.1:8787/v1/halt")
             .bearer_auth(profile["SOLI_API_TOKEN"].as_str().unwrap())
@@ -147,6 +212,38 @@ async fn native_install_scopes_revocation_and_restart() {
         .await
         .unwrap();
     assert_eq!(r["ledger"]["halted"], true);
+    let cycle: Value = http
+        .get("http://127.0.0.1:8787/v1/lifecycle")
+        .bearer_auth(credential["token"].as_str().unwrap())
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(cycle["lifecycle"]["mode"], "semi");
+    assert_eq!(cycle["lifecycle"]["paused"], true);
+    assert_eq!(cycle["lifecycle"]["entry_usdc"], 1_000_000);
+    assert!(
+        http.post(control_url)
+            .bearer_auth(operator)
+            .json(&json!({"action":"close-all","args":[]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        http.post(control_url)
+            .bearer_auth(operator)
+            .json(&json!({"action":"resume-cycle","args":["all"]}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
     command(&["agent-revoke", "test"]);
     assert_eq!(
         http.get("http://127.0.0.1:8787/v1/status")

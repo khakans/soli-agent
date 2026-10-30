@@ -24,7 +24,9 @@ while dry run remains true. A mismatched address, malformed key, or inconsistent
 provider configuration, separate accounts, owner token, caps, and strategy.
 Both local and Vault signatures go through the same transaction decoder,
 simulation policy, spending/slippage limits, approval, journal and reconciliation.
-Local mode does not authorize automatic entries or remove exact-owner approval.
+Local custody does not itself authorize entries. Manual/semi mode requires exact
+entry approval; full mode requires a separately approved expiring strategy/amount
+mandate. See [live cycle](live-cycle.md) and [commands](commands.md).
 The local signing process has no dependency on Vault or unseal operations.
 
 ## Service boundary
@@ -67,7 +69,9 @@ Automatic exits are **off by default**. After an entry finalizes, the owner may
 authorize them on that page for a tracked mint and a period of at most seven days.
 The mandate saves the exact strategy snapshot/hash, survives restart and permits
 only full-position sells on its stop-loss, take-profit or holding-time conditions.
-It never authorizes automatic entries. Fresh quote conditions and authorization
+An exit-only mandate never authorizes entries. Separately, semi/full lifecycle
+mandates attach saved exit rules to new finalized positions; only full mode
+authorizes bounded automatic entries. Fresh quote conditions and authorization
 are rechecked before signing; stale or recovered signals do not trigger a sale.
 
 Equivalent owner CLI commands (epoch seconds, no secret in arguments):

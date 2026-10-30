@@ -1,4 +1,4 @@
-//! Manual-approval live executor. The model never receives a Vault token or a raw key.
+//! Owner-authorized live executor. The model never receives a Vault token or a raw key.
 use axum::{
     Json, Router,
     extract::{Request, State},
@@ -50,6 +50,8 @@ fn units(v: &Value) -> Result<u64> {
 #[derive(Clone, Serialize, Deserialize)]
 struct Pending {
     #[serde(default)]
+    entry_mandate: Option<String>,
+    #[serde(default)]
     exit_hash: Option<String>,
     #[serde(default)]
     requested_by: Option<String>,
@@ -86,6 +88,12 @@ impl From<&super::bridge::Event> for Origin {
 #[derive(Default, Serialize, Deserialize)]
 struct Journal {
     #[serde(default)]
+    automation_paused: bool,
+    #[serde(default)]
+    automation: Option<Automation>,
+    #[serde(default)]
+    entry_attempts: BTreeMap<String, u64>,
+    #[serde(default)]
     exit_mandates: BTreeMap<String, ExitMandate>,
     #[serde(default)]
     marks: Value,
@@ -110,8 +118,155 @@ struct Db {
 }
 #[derive(Clone, Serialize, Deserialize)]
 struct ExitMandate {
+    #[serde(default)]
+    forced: bool,
+    #[serde(default)]
+    retry_at: u64,
     strategy: super::research::Strategy,
     expires_at: u64,
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct Automation {
+    id: String,
+    mode: String,
+    expires_at: u64,
+    entry_usdc: u64,
+    strategy: super::research::Strategy,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct AutomationRequest {
+    mode: String,
+    expires_at: u64,
+    entry_usdc: u64,
+    strategy_hash: String,
+}
+async fn authorize_automation(
+    State(l): State<Arc<Live>>,
+    Json(r): Json<AutomationRequest>,
+) -> Reply {
+    if !["manual", "semi", "full"].contains(&r.mode.as_str()) {
+        return Err(err("mode must be manual, semi or full"));
+    }
+    let mut db = l.db.lock().await;
+    if r.mode == "manual" {
+        db.journal.automation = None;
+    } else {
+        if r.expires_at <= super::now()
+            || r.expires_at > super::now() + 7 * 86400
+            || r.entry_usdc == 0
+            || r.entry_usdc > l.max_position
+            || r.strategy_hash != l.strategy.fingerprint()
+        {
+            return Err(err(
+                "automation needs current strategy, bounded entry amount and expiry within seven days",
+            ));
+        }
+        db.journal.automation = Some(Automation {
+            id: uuid::Uuid::new_v4().to_string(),
+            mode: r.mode,
+            expires_at: r.expires_at,
+            entry_usdc: r.entry_usdc,
+            strategy: l.strategy.clone(),
+        });
+    }
+    db.save().map_err(err)?;
+    Ok(Json(
+        json!({"automation":db.journal.automation,"existing_exit_mandates_preserved":true}),
+    ))
+}
+async fn automatic_entry(l: Arc<Live>, candidates: &Value) -> Result<()> {
+    let authorization = {
+        let db = l.db.lock().await;
+        if db.journal.halted
+            || db.journal.automation_paused
+            || db
+                .journal
+                .pending
+                .as_ref()
+                .is_some_and(|p| p.state != "preview" || p.expires > super::now())
+        {
+            return Ok(());
+        }
+        db.journal.automation.clone().filter(|a| {
+            a.mode == "full"
+                && a.expires_at > super::now()
+                && a.strategy.fingerprint() == l.strategy.fingerprint()
+        })
+    };
+    let Some(a) = authorization else {
+        return Ok(());
+    };
+    for c in candidates["candidates"]
+        .as_array()
+        .ok_or("invalid live candidate response")?
+    {
+        let mint = c["mint"].as_str().ok_or("candidate mint missing")?;
+        let stamp = c["detected_at"].as_u64().ok_or("candidate time missing")?;
+        let expiry = c["expires_at"].as_u64().ok_or("candidate expiry missing")?;
+        if !valid_mint(mint)
+            || stamp > super::now()
+            || super::now().saturating_sub(stamp) > a.strategy.max_data_age_secs
+            || expiry <= super::now()
+            || expiry > stamp + 120
+            || c["strategy_hash"] != a.strategy.fingerprint()
+        {
+            continue;
+        }
+        {
+            let db = l.db.lock().await;
+            if db.journal.positions.contains_key(mint)
+                || db
+                    .journal
+                    .entry_attempts
+                    .get(mint)
+                    .is_some_and(|v| *v >= stamp)
+            {
+                continue;
+            }
+        }
+        let p = preview(
+            State(l.clone()),
+            Json(PreviewRequest {
+                side: "buy".into(),
+                mint: mint.into(),
+                amount: a.entry_usdc,
+            }),
+        )
+        .await
+        .map_err(|(_, Json(v))| v.to_string())?
+        .0;
+        {
+            let mut db = l.db.lock().await;
+            if !db
+                .journal
+                .automation
+                .as_ref()
+                .is_some_and(|x| x.id == a.id && x.expires_at > super::now())
+            {
+                return Err("entry automation revoked".into());
+            }
+            let pending = db.journal.pending.as_mut().ok_or("entry preview missing")?;
+            if Some(pending.id.as_str()) != p["order_id"].as_str() {
+                return Err("entry preview changed".into());
+            }
+            pending.entry_mandate = Some(a.id.clone());
+            db.journal.entry_attempts.insert(mint.into(), stamp);
+            db.save()?;
+        }
+        let _ = execute(
+            State(l.clone()),
+            Json(Approval {
+                order_id: p["order_id"].as_str().unwrap().into(),
+                digest: p["digest"].as_str().unwrap().into(),
+                confirm: true,
+            }),
+        )
+        .await
+        .map_err(|(_, Json(v))| v.to_string())?;
+        break;
+    }
+    Ok(())
 }
 impl Db {
     fn save(&self) -> Result<()> {
@@ -560,14 +715,24 @@ impl Live {
         let mut equity = holdings.get(USDC).copied().unwrap_or(0);
         let data = self.data();
         let mut positions = vec![];
+        let mut complete = true;
         for (mint, cost) in &db.journal.positions {
-            let amount = holdings
-                .get(mint)
-                .copied()
-                .ok_or("tracked live position no longer present; manual reconciliation required")?;
-            let quote = data.quote(mint, USDC, amount).await?;
-            let liquidation =
-                super::data::amount_field(&quote, "otherAmountThreshold")?.saturating_sub(100_000);
+            let amount = holdings.get(mint).copied().unwrap_or(0);
+            let quote = if amount > 0 {
+                data.quote(mint, USDC, amount).await
+            } else {
+                Err("tracked holding missing; manual reconciliation required".into())
+            };
+            let liquidation = match quote
+                .and_then(|q| super::data::amount_field(&q, "otherAmountThreshold"))
+            {
+                Ok(v) => v.saturating_sub(100_000),
+                Err(reason) => {
+                    complete = false;
+                    positions.push(json!({"mint":mint,"cost_usdc_atomic":cost,"error":reason,"liquidation_usdc_atomic":null}));
+                    continue;
+                }
+            };
             equity = equity.checked_add(liquidation).ok_or("equity overflow")?;
             let age = super::now()
                 .saturating_sub(db.journal.opened.get(mint).copied().unwrap_or(super::now()));
@@ -580,20 +745,23 @@ impl Live {
             positions.push(json!({"mint":mint,"amount":amount,"cost_usdc_atomic":cost,"liquidation_usdc_atomic":liquidation,"exit_recommendation":strategy.exit(*cost,liquidation,age),"strategy_hash":strategy.fingerprint(),"automatic_exits_authorized":mandate.is_some(),"execution_requires_owner_approval":mandate.is_none()}));
         }
         let day = super::now() / 86400;
-        if db
-            .journal
-            .day_equity
-            .is_none_or(|(d, b)| d != day || (b == 0 && equity > 0))
+        if complete
+            && db
+                .journal
+                .day_equity
+                .is_none_or(|(d, b)| d != day || (b == 0 && equity > 0))
         {
             db.journal.day_equity = Some((day, equity));
         }
-        let baseline = db.journal.day_equity.unwrap().1;
-        db.journal.peak_equity = db.journal.peak_equity.max(equity);
-        if equity.saturating_mul(100) < baseline.saturating_mul(97) {
+        let baseline = db.journal.day_equity.map_or(0, |(_, v)| v);
+        if complete {
+            db.journal.peak_equity = db.journal.peak_equity.max(equity);
+        }
+        if complete && equity.saturating_mul(100) < baseline.saturating_mul(97) {
             db.journal.halted = true;
         }
         let peak = db.journal.peak_equity;
-        db.journal.marks = json!({"timestamp":super::now(),"equity_usdc_atomic":equity,"scope":"USDC and tracked positions; excludes native SOL and unrelated tokens","positions":positions,"day_start_equity_usdc_atomic":baseline,"drawdown_pct":if peak>0{100.0*(1.0-equity as f64/peak as f64).max(0.0)}else{0.0}});
+        db.journal.marks = json!({"timestamp":super::now(),"complete":complete,"equity_usdc_atomic":complete.then_some(equity),"scope":"USDC and tracked positions; excludes native SOL and unrelated tokens","positions":positions,"day_start_equity_usdc_atomic":baseline,"drawdown_pct":complete.then(||if peak>0{100.0*(1.0-equity as f64/peak as f64).max(0.0)}else{0.0})});
         db.save()
     }
 }
@@ -741,6 +909,9 @@ async fn preview(State(live): State<Arc<Live>>, Json(r): Json<PreviewRequest>) -
         }
     }
     let mut db = live.db.lock().await;
+    if r.side == "buy" && db.journal.marks["complete"] == false {
+        return Err(err("incomplete portfolio marks block new entries"));
+    }
     if db
         .journal
         .pending
@@ -774,6 +945,7 @@ async fn preview(State(live): State<Arc<Live>>, Json(r): Json<PreviewRequest>) -
             }
         }
         if db.journal.halted
+            || db.journal.automation_paused
             || r.amount > live.max_position
             || db.journal.spent.saturating_add(r.amount) > live.max_daily
             || db.journal.positions.len() >= 2
@@ -863,6 +1035,7 @@ async fn preview(State(live): State<Arc<Live>>, Json(r): Json<PreviewRequest>) -
     );
     let p = Pending {
         exit_hash: None,
+        entry_mandate: None,
         requested_by: None,
         origin: None,
         id: uuid::Uuid::new_v4().to_string(),
@@ -947,6 +1120,8 @@ async fn authorize_exit(State(l): State<Arc<Live>>, Json(r): Json<ExitAuthorizat
         db.journal.exit_mandates.insert(
             r.mint.clone(),
             ExitMandate {
+                forced: false,
+                retry_at: 0,
                 strategy: l.strategy.clone(),
                 expires_at: r.expires_at,
             },
@@ -974,9 +1149,16 @@ async fn automatic_exit(l: Arc<Live>) -> Result<()> {
             .as_array()
             .and_then(|positions| {
                 positions.iter().find_map(|p| {
+                    if !p["amount"].is_u64() || !p["liquidation_usdc_atomic"].is_u64() {
+                        return None;
+                    }
                     let mint = p["mint"].as_str()?;
                     let mandate = db.journal.exit_mandates.get(mint)?;
-                    if mandate.expires_at <= super::now()
+                    if db.journal.automation_paused && !mandate.forced {
+                        return None;
+                    }
+                    if mandate.retry_at > super::now()
+                        || mandate.expires_at <= super::now()
                         || db.journal.marks["timestamp"]
                             .as_u64()?
                             .abs_diff(super::now())
@@ -985,11 +1167,13 @@ async fn automatic_exit(l: Arc<Live>) -> Result<()> {
                         return None;
                     }
                     let age = super::now().saturating_sub(*db.journal.opened.get(mint)?);
-                    mandate.strategy.exit(
-                        p["cost_usdc_atomic"].as_u64()?,
-                        p["liquidation_usdc_atomic"].as_u64()?,
-                        age,
-                    )?;
+                    if !mandate.forced {
+                        mandate.strategy.exit(
+                            p["cost_usdc_atomic"].as_u64()?,
+                            p["liquidation_usdc_atomic"].as_u64()?,
+                            age,
+                        )?;
+                    }
                     Some((
                         mint.to_owned(),
                         p["amount"].as_u64()?,
@@ -999,7 +1183,7 @@ async fn automatic_exit(l: Arc<Live>) -> Result<()> {
             })
     };
     if let Some((mint, amount, hash)) = candidate {
-        let result = preview(
+        let result = match preview(
             State(l.clone()),
             Json(PreviewRequest {
                 side: "sell".into(),
@@ -1008,8 +1192,17 @@ async fn automatic_exit(l: Arc<Live>) -> Result<()> {
             }),
         )
         .await
-        .map_err(|(_, Json(v))| v.to_string())?
-        .0;
+        {
+            Ok(result) => result.0,
+            Err((_, Json(reason))) => {
+                let mut db = l.db.lock().await;
+                if let Some(m) = db.journal.exit_mandates.get_mut(&mint) {
+                    m.retry_at = super::now() + 30;
+                    db.save()?;
+                }
+                return Err(reason.to_string());
+            }
+        };
         let mut db = l.db.lock().await;
         let still_triggered = db.journal.exit_mandates.get(&mint).is_some_and(|m| {
             let Some(p) = db.journal.pending.as_ref() else {
@@ -1017,19 +1210,20 @@ async fn automatic_exit(l: Arc<Live>) -> Result<()> {
             };
             m.expires_at > super::now()
                 && m.strategy.fingerprint() == hash
-                && m.strategy
-                    .exit(
-                        db.journal.positions.get(&mint).copied().unwrap_or(0),
-                        p.minimum.saturating_sub(100_000),
-                        super::now().saturating_sub(
-                            db.journal
-                                .opened
-                                .get(&mint)
-                                .copied()
-                                .unwrap_or(super::now()),
-                        ),
-                    )
-                    .is_some()
+                && (m.forced
+                    || m.strategy
+                        .exit(
+                            db.journal.positions.get(&mint).copied().unwrap_or(0),
+                            p.minimum.saturating_sub(100_000),
+                            super::now().saturating_sub(
+                                db.journal
+                                    .opened
+                                    .get(&mint)
+                                    .copied()
+                                    .unwrap_or(super::now()),
+                            ),
+                        )
+                        .is_some())
         });
         if !still_triggered {
             if db
@@ -1126,8 +1320,18 @@ async fn execute(State(l): State<Arc<Live>>, Json(a): Json<Approval>) -> Reply {
     {
         return Err(err("approval mismatch, already submitted, or expired"));
     }
-    if db.journal.halted && p.side == "buy" {
+    if (db.journal.halted || db.journal.automation_paused) && p.side == "buy" {
         return Err(err("entries halted"));
+    }
+    let today = super::now() / 86400;
+    if db.journal.day != today {
+        db.journal.day = today;
+        db.journal.spent = 0;
+    }
+    if p.side == "buy"
+        && (p.input > l.max_position || db.journal.spent.saturating_add(p.input) > l.max_daily)
+    {
+        return Err(err("approved order exceeds current spend caps"));
     }
     let mut tx = l.inspect(&p).await.map_err(err)?;
     // Recheck actual blockhash validity before signing; no silent rebuilding after approval.
@@ -1147,6 +1351,28 @@ async fn execute(State(l): State<Arc<Live>>, Json(a): Json<Approval>) -> Reply {
         })
     {
         return Err(err("automatic exit authorization revoked or expired"));
+    }
+    if db.journal.automation_paused
+        && p.exit_hash.is_some()
+        && !db
+            .journal
+            .exit_mandates
+            .get(&p.mint)
+            .is_some_and(|m| m.forced)
+    {
+        return Err(err("automated exits paused"));
+    }
+    if let Some(id) = &p.entry_mandate
+        && !db.journal.automation.as_ref().is_some_and(|a| {
+            a.mode == "full"
+                && a.id == *id
+                && a.expires_at > super::now()
+                && a.strategy.fingerprint() == l.strategy.fingerprint()
+                && p.side == "buy"
+                && p.input <= a.entry_usdc
+        })
+    {
+        return Err(err("automatic entry authorization revoked or expired"));
     }
     let signature = l.sign(&mut tx).await.map_err(err)?;
     p.signature = Some(signature.clone());
@@ -1190,8 +1416,31 @@ async fn reconcile(State(l): State<Arc<Live>>) -> Reply {
     let succeeded = meta["err"].is_null();
     if succeeded {
         if p.side == "buy" {
+            // A preview/submission can straddle UTC midnight. Charge the day of
+            // reconciliation conservatively, never reset away an overnight buy.
+            let day = super::now() / 86400;
+            if db.journal.day != day {
+                db.journal.day = day;
+                db.journal.spent = 0;
+            }
             db.journal.positions.insert(p.mint.clone(), p.input);
             db.journal.opened.insert(p.mint.clone(), super::now());
+            if let Some(a) = db
+                .journal
+                .automation
+                .clone()
+                .filter(|a| a.expires_at > super::now())
+            {
+                db.journal.exit_mandates.insert(
+                    p.mint.clone(),
+                    ExitMandate {
+                        forced: false,
+                        retry_at: 0,
+                        strategy: a.strategy,
+                        expires_at: a.expires_at,
+                    },
+                );
+            }
             db.journal.spent = db
                 .journal
                 .spent
@@ -1203,7 +1452,7 @@ async fn reconcile(State(l): State<Arc<Live>>) -> Reply {
             db.journal.exit_mandates.remove(&p.mint);
         }
     }
-    let result = json!({"order_id":p.id,"state":if succeeded{"finalized"}else{"failed"},"signature":signature,"receipt":receipt});
+    let result = json!({"order_id":p.id,"side":p.side,"mint":p.mint,"input_amount":p.input,"sequence":db.journal.completed.len(),"finalized_at":super::now(),"usdc_delta_atomic":receipt_usdc(&receipt,&l.wallet).map(|v|v.to_string()),"state":if succeeded{"finalized"}else{"failed"},"signature":signature,"receipt":receipt});
     db.journal.completed.insert(p.id, result.clone());
     db.journal.pending = None;
     db.save().map_err(err)?;
@@ -1221,6 +1470,69 @@ async fn halt(State(l): State<Arc<Live>>, Json(c): Json<Control>) -> Reply {
     db.save().map_err(err)?;
     Ok(Json(json!({"halted":c.halted,"exits_allowed":true})))
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PauseRequest {
+    scope: String,
+    paused: bool,
+}
+async fn pause_cycle(State(l): State<Arc<Live>>, Json(r): Json<PauseRequest>) -> Reply {
+    let mut db = l.db.lock().await;
+    match r.scope.as_str() {
+        "entries" => db.journal.halted = r.paused,
+        "all" => db.journal.automation_paused = r.paused,
+        _ => return Err(err("pause scope must be entries or all")),
+    };
+    db.save().map_err(err)?;
+    Ok(Json(
+        json!({"entries_paused":db.journal.halted,"automation_paused":db.journal.automation_paused,"reconciliation_continues":true,"owner_force_close_available":true}),
+    ))
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CloseRequest {
+    mint: String,
+    confirm: bool,
+}
+async fn force_close(State(l): State<Arc<Live>>, Json(r): Json<CloseRequest>) -> Reply {
+    if !r.confirm {
+        return Err(err("explicit owner confirmation required"));
+    }
+    let mut db = l.db.lock().await;
+    if r.mint == "all" {
+        db.journal.halted = true;
+    }
+    let mints = if r.mint == "all" {
+        db.journal.positions.keys().cloned().collect::<Vec<_>>()
+    } else if db.journal.positions.contains_key(&r.mint) {
+        vec![r.mint]
+    } else {
+        return Err(err("position is not tracked"));
+    };
+    for mint in &mints {
+        db.journal.exit_mandates.insert(
+            mint.clone(),
+            ExitMandate {
+                forced: true,
+                retry_at: 0,
+                strategy: l.strategy.clone(),
+                expires_at: super::now() + 3600,
+            },
+        );
+    }
+    if db
+        .journal
+        .pending
+        .as_ref()
+        .is_some_and(|p| p.state == "preview")
+    {
+        db.journal.pending = None;
+    }
+    db.save().map_err(err)?;
+    Ok(Json(
+        json!({"queued":mints,"scope":"tracked positions only","execution":"sequential fresh full-position sells; unresolved broadcasts block the queue","expires_in_seconds":3600}),
+    ))
+}
 async fn cancel(State(l): State<Arc<Live>>) -> Reply {
     let mut db = l.db.lock().await;
     if db
@@ -1235,11 +1547,124 @@ async fn cancel(State(l): State<Arc<Live>>) -> Reply {
     db.save().map_err(err)?;
     Ok(Json(json!({"cancelled":true})))
 }
-async fn status(State(l): State<Arc<Live>>) -> Reply {
+async fn base_status(State(l): State<Arc<Live>>) -> Reply {
     let db = l.db.lock().await;
     Ok(Json(
         json!({"mode":"live","wallet":l.wallet,"service_identity":l.service_identity,"strategy_hash":l.strategy.fingerprint(),"halted":db.journal.halted,"spent_today_usdc_atomic":if db.journal.day==super::now()/86400{db.journal.spent}else{0},"max_daily_spend_usdc_atomic":l.max_daily,"tracked_positions":db.journal.positions,"marks":db.journal.marks,"completed_order_sample":db.journal.completed.values().take(10).collect::<Vec<_>>(),"pending":db.journal.pending.as_ref().map(|p|json!({"id":p.id,"state":p.state,"signature":p.signature,"expires_at":p.expires})),"owner_approval_required":true}),
     ))
+}
+fn receipt_usdc(receipt: &Value, wallet: &str) -> Option<i128> {
+    let pre = receipt["meta"]["preTokenBalances"].as_array()?;
+    let post = receipt["meta"]["postTokenBalances"].as_array()?;
+    let indexes = pre
+        .iter()
+        .chain(post)
+        .filter(|v| v["owner"] == wallet && v["mint"] == USDC)
+        .filter_map(|v| v["accountIndex"].as_u64())
+        .collect::<std::collections::BTreeSet<_>>();
+    if indexes.is_empty() {
+        return None;
+    }
+    let sum = |rows: &Vec<Value>| -> Option<i128> {
+        rows.iter()
+            .filter(|v| {
+                v["mint"] == USDC
+                    && v["accountIndex"]
+                        .as_u64()
+                        .is_some_and(|i| indexes.contains(&i))
+            })
+            .try_fold(0i128, |a, v| {
+                a.checked_add(
+                    v["uiTokenAmount"]["amount"]
+                        .as_str()?
+                        .parse::<i128>()
+                        .ok()?,
+                )
+            })
+    };
+    sum(post)?.checked_sub(sum(pre)?)
+}
+async fn status(State(l): State<Arc<Live>>) -> Reply {
+    let mut value = base_status(State(l.clone())).await?.0;
+    let db = l.db.lock().await;
+    value["automation"] = json!(db.journal.automation);
+    value["trading_mode"] = json!(
+        db.journal
+            .automation
+            .as_ref()
+            .filter(|a| a.expires_at > super::now())
+            .map_or("manual", |a| a.mode.as_str())
+    );
+    value["owner_approval_required"] = json!(value["trading_mode"] != "full");
+    value["owner_authorization_required"] = json!(true);
+    value["automation_paused"] = json!(db.journal.automation_paused);
+    value["exit_mandates"] = json!(db.journal.exit_mandates);
+    let mut history = db
+        .journal
+        .completed
+        .values()
+        .filter(|v| v["state"] == "finalized")
+        .collect::<Vec<_>>();
+    history.sort_by_key(|v| v["sequence"].as_u64().unwrap_or(0));
+    let mut e = crate::learning::Evidence {
+        source: "live_finalized_receipts".into(),
+        complete: true,
+        ..Default::default()
+    };
+    let mut costs = BTreeMap::new();
+    for v in history {
+        let Some(delta) = v["usdc_delta_atomic"]
+            .as_str()
+            .and_then(|s| s.parse::<i128>().ok())
+        else {
+            e.complete = false;
+            continue;
+        };
+        let ts = v["finalized_at"].as_u64().unwrap_or(0);
+        if e.first == 0 {
+            e.first = ts;
+        }
+        e.last = ts;
+        let mint = v["mint"].as_str().unwrap_or("");
+        if v["side"] == "buy" {
+            costs.insert(mint, -delta);
+        } else if let Some(cost) = costs.remove(mint) {
+            let pnl = delta - cost;
+            e.closed += 1;
+            e.wins += u64::from(pnl > 0);
+            e.net_usdc_atomic += pnl;
+        } else {
+            e.complete = false;
+        }
+    }
+    value["learning_evidence"] = json!(e);
+    let trades = db
+        .journal
+        .completed
+        .values()
+        .filter(|v| v["state"] == "finalized")
+        .collect::<Vec<_>>();
+    let delta = trades.iter().try_fold(0i128, |a, v| {
+        a.checked_add(v["usdc_delta_atomic"].as_str()?.parse::<i128>().ok()?)
+    });
+    let open_cost = db
+        .journal
+        .positions
+        .values()
+        .map(|v| *v as i128)
+        .sum::<i128>();
+    value["pnl"] = json!({"realized_usdc_atomic":delta.and_then(|v|v.checked_add(open_cost)).map(|v|v.to_string()),"receipt_coverage_complete":delta.is_some(),"closed_trades":trades.iter().filter(|v|v["side"]=="sell").count(),"native_fees_lamports":db.journal.completed.values().filter_map(|v|v["receipt"]["meta"]["fee"].as_u64()).map(u128::from).sum::<u128>().to_string(),"note":"USDC PnL from finalized receipt deltas; native SOL fees shown separately, no invented FX conversion"});
+    if let Some(positions) = value["marks"]["positions"].as_array_mut() {
+        for p in positions {
+            p["unrealized_pnl_usdc_atomic"] = json!(
+                p["liquidation_usdc_atomic"]
+                    .as_u64()
+                    .zip(p["cost_usdc_atomic"].as_u64())
+                    .map(|(v, c)| (v as i128 - c as i128).to_string())
+            );
+        }
+    }
+    Ok(Json(value))
 }
 
 pub async fn from_event(live: Arc<Live>, e: &super::bridge::Event) -> Result<Value> {
@@ -1293,6 +1718,68 @@ pub async fn from_event(live: Arc<Live>, e: &super::bridge::Event) -> Result<Val
         ("resume", []) => halt(State(live), Json(Control { halted: false })).await,
         ("cancel", []) => cancel(State(live)).await,
         ("reconcile", []) => reconcile(State(live)).await,
+        ("force-close", [mint, confirm]) if confirm == "CONFIRM" => {
+            force_close(
+                State(live),
+                Json(CloseRequest {
+                    mint: mint.clone(),
+                    confirm: true,
+                }),
+            )
+            .await
+        }
+        ("close-all", [confirm]) if confirm == "CONFIRM" => {
+            force_close(
+                State(live),
+                Json(CloseRequest {
+                    mint: "all".into(),
+                    confirm: true,
+                }),
+            )
+            .await
+        }
+        ("pause", [scope]) => {
+            pause_cycle(
+                State(live),
+                Json(PauseRequest {
+                    scope: scope.clone(),
+                    paused: true,
+                }),
+            )
+            .await
+        }
+        ("resume-cycle", [scope]) => {
+            pause_cycle(
+                State(live),
+                Json(PauseRequest {
+                    scope: scope.clone(),
+                    paused: false,
+                }),
+            )
+            .await
+        }
+        ("mode", [mode, hours, amount]) => {
+            let hours = hours.parse::<u64>().map_err(|_| "hours must be integer")?;
+            if !(1..=168).contains(&hours) {
+                return Err("hours must be 1..168".into());
+            }
+            let amount = amount
+                .parse::<u64>()
+                .ok()
+                .and_then(|v| v.checked_mul(1_000_000))
+                .ok_or("invalid USDC amount")?;
+            let hash = live.strategy.fingerprint();
+            authorize_automation(
+                State(live),
+                Json(AutomationRequest {
+                    mode: mode.clone(),
+                    expires_at: super::now() + hours * 3600,
+                    entry_usdc: amount,
+                    strategy_hash: hash,
+                }),
+            )
+            .await
+        }
         _ => return Err("unsupported owner event".into()),
     };
     response
@@ -1324,6 +1811,28 @@ pub fn routes(live: Arc<Live>) -> Router {
             if let Err(reason) = automatic_exit(worker.clone()).await {
                 eprintln!("Owner-authorized automatic exit deferred: {reason}");
             }
+            let enabled = {
+                let db = worker.db.lock().await;
+                db.journal
+                    .automation
+                    .as_ref()
+                    .is_some_and(|a| a.mode == "full" && a.expires_at > super::now())
+            };
+            if enabled {
+                let response = worker
+                    .http
+                    .get("http://127.0.0.1:8787/v1/live/candidates")
+                    .bearer_auth(&worker.agent_token)
+                    .send()
+                    .await;
+                if let Ok(r) = response
+                    && r.status().is_success()
+                    && let Ok(candidates) = r.json::<Value>().await
+                    && automatic_entry(worker.clone(), &candidates).await.is_err()
+                {
+                    eprintln!("Automatic entry deferred; authorization and risk gates retained");
+                }
+            }
         }
     });
     let read = Router::new()
@@ -1333,6 +1842,9 @@ pub fn routes(live: Arc<Live>) -> Router {
     Router::new()
         .route("/v1/live/approval", get(owner_pending))
         .route("/v1/live/exits", post(authorize_exit))
+        .route("/v1/live/automation", post(authorize_automation))
+        .route("/v1/live/pause", post(pause_cycle))
+        .route("/v1/live/close", post(force_close))
         .route("/v1/live/execute", post(execute))
         .route("/v1/live/reconcile", post(reconcile))
         .route("/v1/live/cancel", post(cancel))
@@ -1359,6 +1871,154 @@ mod tests {
     use solana_instruction::{AccountMeta, Instruction};
     use solana_message::{Message, VersionedMessage};
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    #[tokio::test]
+    async fn failed_close_does_not_starve_other_positions() {
+        let (l, m, server) = fixture_backend(false, true).await;
+        let bad = Pubkey::new_from_array([22; 32]).to_string();
+        m.selling.store(true, Ordering::SeqCst);
+        {
+            let mut db = l.db.lock().await;
+            for mint in [&bad, &m.mint] {
+                db.journal.positions.insert(mint.clone(), 1_000_000);
+                db.journal.opened.insert(mint.clone(), super::super::now());
+            }
+            db.journal.marks = json!({"timestamp":super::super::now(),"positions":[
+                {"mint":bad,"amount":0,"liquidation_usdc_atomic":0},
+                {"mint":m.mint,"amount":500,"liquidation_usdc_atomic":800000}]});
+        }
+        let _ = force_close(
+            State(l.clone()),
+            Json(CloseRequest {
+                mint: "all".into(),
+                confirm: true,
+            }),
+        )
+        .await
+        .unwrap();
+        assert!(automatic_exit(l.clone()).await.is_err());
+        assert!(l.db.lock().await.journal.exit_mandates[&bad].retry_at > super::super::now());
+        automatic_exit(l.clone()).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 1);
+        assert!(l.db.lock().await.journal.halted);
+        server.abort();
+    }
+    #[tokio::test]
+    async fn semi_full_pause_and_forced_exit_complete_without_bypassing_policy() {
+        let (l, m, server) = fixture_backend(false, true).await;
+        let candidates = json!({"candidates":[{"mint":m.mint,"strategy_hash":l.strategy.fingerprint(),"detected_at":super::super::now(),"expires_at":super::super::now()+30}]});
+        automatic_entry(l.clone(), &candidates).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 0);
+        let authorization = |mode: &str| AutomationRequest {
+            mode: mode.into(),
+            expires_at: super::super::now() + 3600,
+            entry_usdc: 1_000_000,
+            strategy_hash: l.strategy.fingerprint(),
+        };
+        let _ = authorize_automation(State(l.clone()), Json(authorization("semi")))
+            .await
+            .unwrap();
+        automatic_entry(l.clone(), &candidates).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 0);
+        let _ = authorize_automation(State(l.clone()), Json(authorization("full")))
+            .await
+            .unwrap();
+        let mut stale = candidates.clone();
+        stale["candidates"][0]["expires_at"] = json!(0);
+        automatic_entry(l.clone(), &stale).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 0);
+        automatic_entry(l.clone(), &candidates).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 1);
+        m.finalized.store(true, Ordering::SeqCst);
+        let _ = reconcile(State(l.clone())).await.unwrap();
+        assert!(
+            l.db.lock()
+                .await
+                .journal
+                .exit_mandates
+                .contains_key(&m.mint)
+        );
+        m.selling.store(true, Ordering::SeqCst);
+        {
+            let mut db = l.db.lock().await;
+            db.journal.marks = json!({"timestamp":super::super::now(),"positions":[{"mint":m.mint,"amount":500,"cost_usdc_atomic":1000000,"liquidation_usdc_atomic":800000}]});
+        }
+        let _ = pause_cycle(
+            State(l.clone()),
+            Json(PauseRequest {
+                scope: "all".into(),
+                paused: true,
+            }),
+        )
+        .await
+        .unwrap();
+        automatic_exit(l.clone()).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 1);
+        let _ = force_close(
+            State(l.clone()),
+            Json(CloseRequest {
+                mint: "all".into(),
+                confirm: true,
+            }),
+        )
+        .await
+        .unwrap();
+        automatic_exit(l.clone()).await.unwrap();
+        assert_eq!(m.sends.load(Ordering::SeqCst), 2);
+        let _ = reconcile(State(l.clone())).await.unwrap();
+        assert!(l.db.lock().await.journal.positions.is_empty());
+        let mut denied = authorization("full");
+        denied.entry_usdc = l.max_position + 1;
+        assert!(
+            authorize_automation(State(l.clone()), Json(denied))
+                .await
+                .is_err()
+        );
+        server.abort();
+    }
+    #[test]
+    fn receipt_pnl_is_wallet_scoped_and_missing_data_is_not_zero() {
+        let row = |owner: &str, amount: &str| json!({"accountIndex":1,"owner":owner,"mint":USDC,"uiTokenAmount":{"amount":amount}});
+        let receipt = json!({"meta":{"preTokenBalances":[row("wallet","1000")],"postTokenBalances":[row("wallet","1400")]}});
+        assert_eq!(receipt_usdc(&receipt, "wallet"), Some(400));
+        assert_eq!(receipt_usdc(&receipt, "other"), None);
+        assert_eq!(receipt_usdc(&Value::Null, "wallet"), None);
+    }
+    #[tokio::test]
+    async fn execute_rechecks_caps_and_overnight_receipts_keep_daily_spend() {
+        let (l, m, server) = fixture(false).await;
+        let p = preview(
+            State(l.clone()),
+            Json(PreviewRequest {
+                side: "buy".into(),
+                mint: m.mint.clone(),
+                amount: 1_000_000,
+            }),
+        )
+        .await
+        .unwrap()
+        .0;
+        let approval = || Approval {
+            order_id: p["order_id"].as_str().unwrap().into(),
+            digest: p["digest"].as_str().unwrap().into(),
+            confirm: true,
+        };
+        l.db.lock().await.journal.spent = l.max_daily;
+        assert!(execute(State(l.clone()), Json(approval())).await.is_err());
+        assert_eq!(m.sends.load(Ordering::SeqCst), 0);
+        l.db.lock().await.journal.spent = 0;
+        let _ = execute(State(l.clone()), Json(approval())).await.unwrap();
+        {
+            let mut db = l.db.lock().await;
+            db.journal.day = super::super::now() / 86400 - 1;
+            db.journal.spent = 777;
+        }
+        m.finalized.store(true, Ordering::SeqCst);
+        let _ = reconcile(State(l.clone())).await.unwrap();
+        let db = l.db.lock().await;
+        assert_eq!(db.journal.day, super::super::now() / 86400);
+        assert_eq!(db.journal.spent, 1_000_000);
+        server.abort();
+    }
 
     #[tokio::test]
     async fn automatic_exits_require_a_current_owner_mandate_and_finalize_once() {
@@ -1468,6 +2128,26 @@ mod tests {
             super::super::research::Strategy::default()
                 .exit(1_000_000, 1_100_000, 0)
                 .is_none()
+        );
+        // An unpriceable/missing holding blocks new buys, while other marks remain usable.
+        live.db
+            .lock()
+            .await
+            .journal
+            .positions
+            .insert(Pubkey::new_from_array([23; 32]).to_string(), 1_000_000);
+        live.refresh_marks().await.unwrap();
+        let state = status(State(live.clone())).await.unwrap().0;
+        assert_eq!(state["marks"]["complete"], false);
+        assert!(state["marks"]["equity_usdc_atomic"].is_null());
+        assert_eq!(
+            state["marks"]["positions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter(|p| p["liquidation_usdc_atomic"].is_u64())
+                .count(),
+            1
         );
         task.abort();
         fixture_task.abort();
@@ -1585,6 +2265,7 @@ mod tests {
     fn pending(mint: &str) -> Pending {
         Pending {
             exit_hash: None,
+            entry_mandate: None,
             requested_by: None,
             origin: None,
             id: "test-order".into(),
@@ -1886,6 +2567,44 @@ mod tests {
             let restored: Journal = serde_json::from_str(&saved).unwrap();
             assert!(restored.pending.is_none());
             assert_eq!(restored.completed.len(), 1);
+            drop(db);
+            m.selling.store(true, Ordering::SeqCst);
+            let sold = preview(
+                State(l.clone()),
+                Json(PreviewRequest {
+                    side: "sell".into(),
+                    mint: m.mint.clone(),
+                    amount: 500,
+                }),
+            )
+            .await
+            .unwrap()
+            .0;
+            let approval = Approval {
+                order_id: sold["order_id"].as_str().unwrap().into(),
+                digest: sold["digest"].as_str().unwrap().into(),
+                confirm: true,
+            };
+            assert_eq!(
+                execute(State(l.clone()), Json(approval)).await.unwrap().0["state"],
+                "submitted"
+            );
+            assert_eq!(
+                reconcile(State(l.clone())).await.unwrap().0["state"],
+                "finalized"
+            );
+            let db = l.db.lock().await;
+            assert!(db.journal.positions.is_empty());
+            assert!(db.journal.pending.is_none());
+            assert_eq!(db.journal.completed.len(), 2);
+            let saved: String = db
+                .connection
+                .query_row("SELECT data FROM live_journal WHERE id=1", [], |r| r.get(0))
+                .unwrap();
+            let restored: Journal = serde_json::from_str(&saved).unwrap();
+            assert!(restored.positions.is_empty());
+            assert_eq!(restored.completed.len(), 2);
+            assert_eq!(m.sends.load(Ordering::SeqCst), 2);
             handle.abort();
         }
     }

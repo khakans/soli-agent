@@ -21,4 +21,10 @@ No automatic buys are authorized. Failed providers, an unresolved order or lost 
 <label><input id="exit-confirm" type="checkbox"> I authorize automatic exits under the strategy displayed above.</label>
 <button id="arm" disabled>Authorize automatic exits</button>
 <button id="disarm" disabled>Revoke automatic exits</button>
+<h2>Trading mode</h2>
+<p>Semi: approve each entry, then the saved strategy manages exits. Full: authorize entries and exits until expiry. Position, daily spend and simulation limits always apply. Changing strategy requires a new authorization.</p>
+<label>Mode <select id="mode"><option value="manual">Manual / disable new automated entries</option><option value="semi">Semi manual</option><option value="full">Full automatic</option></select></label>
+<label>Entry size USDC <input id="entry-usdc" type="number" min="1" max="100" step="1" value="1"></label>
+<label><input id="mode-confirm" type="checkbox"> I authorize this mode, entry size and the strategy displayed above until the selected expiry.</label>
+<button id="mode-save">Save trading mode</button>
 <script src="/approve.js" defer></script></html>

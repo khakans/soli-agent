@@ -352,13 +352,14 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
             json!({"mint":mint,"accepted":accepted,"wallets_still_holding":still_holding,"risk":screening,"market":sample,"strategy_hash":app.strategy.fingerprint(),"deadline":first+120}),
         );
         if accepted {
-            if app.auto_paper && !app.live_enabled {
+            research::live_candidate(app, &mint, "wallet_convergence")?;
+            if crate::paper_cycle::entry(app) && !app.live_enabled {
                 let q = crate::preview(
                     axum::extract::State(app.clone()),
                     axum::Json(crate::QuoteRequest {
                         side: "buy".into(),
                         mint: mint.clone(),
-                        amount: app.strategy.entry_usdc,
+                        amount: crate::paper_cycle::amount(app),
                     }),
                 )
                 .await;

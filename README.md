@@ -30,7 +30,15 @@ before considering real funds.
   exact-order approval, Ed25519 signature verification, preflight submission,
   durable submission journal, finalization polling and restart reconciliation.
 - Live liquidation marks and exit recommendations. Live exits, like entries,
-  require owner approval. Optional automatic exits use a separate expiring owner mandate.
+  use owner authorization. Semi mode approves entries then manages exits; full
+  mode also enters automatically under an expiring, amount-bounded owner mandate.
+- Persistent pause/resume, forced liquidation of one/all tracked positions,
+  public-wallet balances and receipt-based PnL. See [commands](docs/commands.md).
+- Learning from completed forward paper/live evidence, versioned candidate
+  strategies, and opt-in paper-only automatic strategy refinement/restart.
+- Screened strategy signals enter a persistent, expiring live candidate inbox
+  (`soli_status` view `live-candidates`). Deduplicated notifications use the outbox.
+  Candidates never submit orders; request a fresh preview and exact owner approval.
 - Native Hermes plugin, read-only model tool, signed transport context, stable-ID
   owner authorization and replay protection across Slack, Telegram and Discord.
 - Agent-neutral MCP tools for status/reports, token research, paper/live previews
@@ -52,7 +60,8 @@ $env:SOLI_SMART_WALLETS = '<wallet-one>,<wallet-two>'
 cargo run -- serve
 ```
 
-No `.env` is loaded automatically. See `.env.example`. Without provider keys,
+Direct commands use their environment. Native lifecycle commands read
+`SOLI_HOME/.env` when present; see `.env.example`. Without provider keys,
 local ledger/status work but screening/quotes report unavailable. Automatic paper
 entries/exits require explicit `SOLI_AUTO_PAPER=true`. No private key is required.
 
@@ -79,7 +88,7 @@ Paper: two positions, 5% initial capital per position including estimated fees,
 10% entry-cost exposure, no averaging, 3% daily realized-loss entry halt and 3%
 complete marked-equity daily drawdown entry halt. Exits remain allowed. UTC day.
 
-Live: exact owner approval each order, configurable gross daily spend/per-position
+Live: exact owner approval or an explicit bounded automation mandate, gross daily spend/per-position
 caps plus 5%/10% starting marked-equity limits, 3% daily marked-equity entry halt,
 maximum simulated SOL cost 0.005 SOL and remaining reserve 0.01 SOL. Live equity
 covers USDC and tracked positions, excluding SOL reserve and unrelated holdings.

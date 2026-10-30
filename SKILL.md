@@ -5,6 +5,12 @@ description: Install or connect the Soli Solana memecoin engine, screen tokens, 
 
 # Soli
 
+The owner authorizes autonomous code/strategy improvements and normal commits
+and pushes to this repository after meaningful tests pass. Read
+[learning and self-development](docs/learning.md). This grants no private-key,
+owner-token, unrestricted sudo, force-push or live-trade activation permission.
+Use `soli_menu` or `soli-agent menu` for the universal command catalogue.
+
 Soli is a standalone Rust trading service. Your agent supplies the conversational
 interface; Hermes is optional. Start with [INSTALL.md](INSTALL.md) when asked to
 install this repository. Keep this skill alongside the checkout so links resolve.
@@ -16,6 +22,7 @@ files or other sudo commands. Check actual status instead of relying on old
 deployment notes; a successful build alone is not a successful deployment.
 
 For an existing connection, discover the Soli tools available in the host:
+- `soli_menu`: default command reference, independent of host or chat platform.
 - `soli_status`: portfolio, report, daily snapshots or live signer status.
 - `soli_token`: risk, market, samples or signal replay for a mint.
 - `soli_preview`: paper/live preview; never submits a transaction.

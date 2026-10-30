@@ -86,17 +86,27 @@ fn result(r: Result<Value, String>) -> CallToolResult {
 #[tool_router]
 impl Soli {
     #[tool(
-        description = "Read mode, portfolio, reports, performance evidence, notifications or provider readiness. Views: status, report, daily, live-status, performance, notifications, readiness."
+        description = "List Soli commands for any host or transport. Read-only; no trading authority."
+    )]
+    async fn soli_menu(&self) -> CallToolResult {
+        CallToolResult::success(vec![ContentBlock::text(crate::wallet::MENU)])
+    }
+    #[tool(
+        description = "Read mode, portfolio, reports and evidence. Views: status, lifecycle (paper), wallet, positions, pnl, learning, report, daily, live-status, live-candidates, performance, notifications, readiness. Live execution requires separate owner authorization, including a bounded mandate for full mode."
     )]
     async fn soli_status(&self, Parameters(r): Parameters<Read>) -> CallToolResult {
         let path = match r.view.as_deref().unwrap_or("status") {
             "status" => "/v1/status",
+            "lifecycle" => "/v1/lifecycle",
             "report" => "/v1/report",
             "daily" => "/v1/reports/daily",
             "live-status" => "/v1/live/status",
+            "live-candidates" => "/v1/live/candidates",
             "performance" => "/v1/performance",
             "notifications" => "/v1/notifications",
             "readiness" => "/v1/readiness",
+            "wallet" | "positions" | "pnl" => "/v1/wallet",
+            "learning" => "/v1/learning",
             _ => return result(Err("unsupported view".into())),
         };
         result(api(path, None).await.map(|v| json!({"data":v})))
@@ -181,7 +191,7 @@ pub async fn verify(path: &std::path::Path) -> Result<(), Box<dyn std::error::Er
     let transport = rmcp::transport::TokioChildProcess::new(command)?;
     let client =
         tokio::time::timeout(std::time::Duration::from_secs(15), ().serve(transport)).await??;
-    if client.list_all_tools().await?.len() != 4 {
+    if client.list_all_tools().await?.len() != 5 {
         return Err("unexpected Soli tool catalogue".into());
     }
     let status = client
@@ -208,7 +218,7 @@ mod tests {
             Soli.serve(server).await.unwrap().waiting().await.unwrap();
         });
         let client = ().serve(client).await.unwrap();
-        assert_eq!(client.list_all_tools().await.unwrap().len(), 4);
+        assert_eq!(client.list_all_tools().await.unwrap().len(), 5);
         let r = client
             .call_tool(
                 rmcp::model::CallToolRequestParams::new("soli_preview").with_arguments(

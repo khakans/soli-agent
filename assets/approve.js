@@ -49,3 +49,13 @@ async function authorizeExits(enabled) {
 }
 el("arm").onclick = () => authorizeExits(true);
 el("disarm").onclick = () => authorizeExits(false);
+el("mode-save").onclick = async () => {
+  if (!reviewed || !el("mode-confirm").checked) return;
+  const hours = Number(el("hours").value), amount = Number(el("entry-usdc").value);
+  if (!Number.isInteger(hours) || hours < 1 || hours > 168 || !Number.isInteger(amount) || amount < 1 || amount > 100) return;
+  try {
+    const result = await call("/v1/live/automation", {mode: el("mode").value,
+      expires_at: Math.floor(Date.now()/1000)+hours*3600, entry_usdc: amount*1000000, strategy_hash: reviewed.strategy_hash});
+    el("result").textContent=JSON.stringify(result); el("mode-confirm").checked=false;
+  } catch(e) {el("result").textContent=e.message;}
+};

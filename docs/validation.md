@@ -1,8 +1,9 @@
-# Validation status — 2026-10-29
+# Validation status — 2026-10-30
 
-Latest Windows run: **28 Rust checks passed** (2 ledger, 25 engine/adapter/policy,
-1 real installation acceptance). Formatting and Clippy with warnings denied passed.
-The locked dependency audit reported **0 vulnerabilities and no advisory warnings**.
+Latest local run: **40 Rust checks passed** across ledger, engine/adapter/policy,
+deployment helper and native installation acceptance. Formatting and Clippy with
+warnings denied passed. The earlier locked dependency audit reported no advisories;
+that result is not a fresh audit of later dependency changes.
 Native installation and MCP-to-engine status were exercised in the local checkout;
 the temporary background engine was stopped after verification.
 
@@ -33,9 +34,10 @@ slippage; route source/destination accounts must belong to the wallet. Unsupport
 root variants and Token-2022 state are rejected before signing.
 
 Windows/Linux CI is defined in `.github/workflows/check.yml`; a workflow file is
-not evidence of an actual hosted run. Production provider credentials are not
-available yet, as confirmed by the operator. Real Helius/Jupiter/GoPlus and native
-workspace/channel acceptance remain pending. Forward paper observation requires
+not evidence of an actual hosted run. Real Helius RPC/WebSocket, Jupiter/GoPlus
+and native Hermes MCP acceptance have passed on the operator's VPS. Real live
+signer execution and each channel's owner routing still need separate acceptance.
+Forward paper observation requires
 market data and elapsed time; no trading record is fabricated from historical signals.
 
 Live startup rejects missing dependencies, same engine/signer account, mismatched
