@@ -1,14 +1,17 @@
 # Meridian reference and Soli design
 
 Reference reviewed: https://github.com/yunus-0x/meridian at
-`cb3a2f0d99c4938c8f9b2e2ca164bf98495ad2ef` on 2026-10-29.
+`cb3a2f0d99c4938c8f9b2e2ca164bf98495ad2ef`, rechecked from Git on 2026-10-30.
 No Meridian source files are vendored or copied. The implementation is independent;
 the separate Jupiter ABI data is attributed in `config/abi/README.md`.
 
 Meridian main is a deterministic wallet-triggered Meteora DLMM LP bot. Its README
 describes WebSocket monitoring, signature backfill, distinct-wallet convergence,
 bounded screening, independent management and durable submission reconciliation.
-It does not currently require an LLM; its Telegram integration is notification-only.
+It does not require an LLM. Its source also contains a Telegram inline admin
+console, settings editing and shadow/live controls; the README's notification-only
+description is behind that implementation. Soli uses the host's native picker
+across transports, a Rust menu catalogue, hidden setup and supervised reloads.
 
 Soli adopts that lifecycle for **spot memecoin swaps**, not liquidity provision:
 
@@ -22,9 +25,9 @@ Soli adopts that lifecycle for **spot memecoin swaps**, not liquidity provision:
 | Risk / route checks | GoPlus + on-chain authorities + holder concentration + two-way Jupiter coverage |
 | Memory / cooldown | SQLite cursors, durable queue, decision events, 30-minute per-mint cooldown |
 | Shadow | Default dry run; automatic paper execution additionally requires SOLI_AUTO_PAPER=true |
-| Position management | Independent paper exit/mark worker; live exit recommendations require owner approval |
+| Position management | Independent mark/exit worker; semi entries need approval, full entries/exits need a bounded owner mandate |
 | Restart safety | Persisted submission signature blocks new orders until finalization/reconciliation |
-| Control surfaces | Hermes plugin for Slack, Telegram and Discord, signed stable-ID context |
+| Control surfaces | Generic CLI/MCP and optional Hermes native menus across Slack, Telegram, Discord, WhatsApp/Cloud; signed stable-ID controls |
 
 LP bin ranges, fee harvesting, LP TVL yield metrics and DLMM transaction encoders
 are deliberately not transplanted into a spot strategy.

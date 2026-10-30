@@ -13,6 +13,9 @@ pub fn handles(cmd: &str) -> bool {
     [
         "install",
         "setup",
+        "up",
+        "down",
+        "restart",
         "configure",
         "agent-add",
         "agent-revoke",
@@ -39,6 +42,12 @@ pub fn home() -> Result<PathBuf> {
         });
     }
     let exe = std::env::current_exe()?;
+    #[cfg(unix)]
+    if exe == Path::new("/opt/soli/bin/soli-agent")
+        && Path::new("/var/lib/soli-engine/engine.json").exists()
+    {
+        return Ok("/var/lib/soli-engine".into());
+    }
     if let Some(p) = exe.parent().and_then(Path::parent)
         && (p.join("engine.json").exists() || p.join(".env").exists())
     {
@@ -98,6 +107,16 @@ fn write(path: &Path, bytes: &[u8]) -> Result<()> {
     protect(temp.path())?;
     temp.write_all(bytes)?;
     temp.as_file().sync_all()?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if temp.as_file().metadata()?.uid() == 0 {
+            let owner = std::fs::symlink_metadata(path).or_else(|_| std::fs::metadata(parent))?;
+            run(Command::new("chown")
+                .arg(format!("{}:{}", owner.uid(), owner.gid()))
+                .arg(temp.path()))?;
+        }
+    }
     temp.persist(path)
         .map_err(|_| "atomic configuration replacement failed")?;
     Ok(())
@@ -290,11 +309,113 @@ fn stop(home: &Path, role: &str) -> Result<()> {
     }
     let file = home.join(format!("{role}.pid.json"));
     if file.exists() {
-        let r = load(&file)?;
-        terminate(&r["child"])?;
-        std::thread::sleep(Duration::from_millis(300));
-        terminate(&r["wrapper"])?;
+        let initial = load(&file)?;
+        let marker = home.join(format!("{role}.stop"));
+        write(&marker, b"stop")?;
+        // A settings reload may be publishing a new child PID. Stop the actual
+        // current child and let the supervisor observe the marker before exiting.
+        for _ in 0..50 {
+            let current = load(&file).unwrap_or_else(|_| initial.clone());
+            terminate(&current["child"])?;
+            if process(initial["wrapper"]["pid"].as_u64().unwrap_or(0) as u32).is_none() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        terminate(&initial["wrapper"])?;
         let _ = std::fs::remove_file(&file);
+        let _ = std::fs::remove_file(marker);
+    }
+    Ok(())
+}
+async fn lifecycle(home: &Path, action: &str) -> Result<()> {
+    let settings = profile(home, "engine")?;
+    let live = match settings.get("SOLI_DRY_RUN").map(String::as_str) {
+        Some("false") => true,
+        Some("true") | None => false,
+        _ => return Err("SOLI_DRY_RUN must be true or false".into()),
+    };
+    let managed = cfg!(target_os = "linux") && home == Path::new("/var/lib/soli-engine");
+    if managed {
+        // Fixed service names preserve the configured OS-account separation.
+        if action == "down" || action == "restart" {
+            run(Command::new("systemctl").args(["stop", "soli-engine.service"]))?;
+        }
+        if action == "down" {
+            run(Command::new("systemctl").args(["stop", "soli-signer.service"]))?;
+        } else {
+            if live {
+                run(Command::new("systemctl").args([
+                    if action == "restart" {
+                        "restart"
+                    } else {
+                        "start"
+                    },
+                    "soli-signer.service",
+                ]))?;
+                let http = reqwest::Client::builder()
+                    .no_proxy()
+                    .timeout(Duration::from_secs(2))
+                    .build()?;
+                let mut healthy = false;
+                for _ in 0..50 {
+                    if let Ok(r) = http.get("http://127.0.0.1:8788/health").send().await
+                        && r.status().is_success()
+                        && let Ok(v) = r.json::<Value>().await
+                        && v["role"] == "isolated-signer"
+                    {
+                        healthy = true;
+                        break;
+                    }
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                }
+                if !healthy {
+                    return Err("signer did not become ready; engine was not started".into());
+                }
+            }
+            run(Command::new("systemctl").args(["start", "soli-engine.service"]))?;
+        }
+    } else {
+        // A local paper install needs no signing service. Live signer custody stays outside this account.
+        if action == "down" || action == "restart" {
+            stop(home, "engine")?;
+        }
+        if action != "down" {
+            if live {
+                let r=reqwest::Client::builder().no_proxy().timeout(Duration::from_secs(3)).build()?
+                    .get("http://127.0.0.1:8788/health").send().await
+                    .map_err(|_|"start the separately managed signer first; its account must differ from the engine")?;
+                if !r.status().is_success() {
+                    return Err("isolated signer is not healthy".into());
+                }
+            }
+            let running = home.join("engine.pid.json").exists()
+                && load(&home.join("engine.pid.json")).is_ok_and(|r| {
+                    process(r["wrapper"]["pid"].as_u64().unwrap_or(0) as u32).is_some()
+                });
+            if !running {
+                start(home, "engine").await?;
+            }
+        }
+    }
+    if action != "down" {
+        let mut status = None;
+        for _ in 0..50 {
+            if let Ok(v) = api(home, "/v1/status", None).await {
+                status = Some(v);
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        let status = status.ok_or("engine did not become ready; inspect service status")?;
+        if status["live_enabled"] != live {
+            return Err(
+                "running engine mode does not match configuration; restart required".into(),
+            );
+        }
+        println!("{}", crate::menu::render(&status));
+    } else {
+        println!("Soli stopped; journals preserved");
     }
     Ok(())
 }
@@ -438,6 +559,52 @@ fn connect(home: &Path, name: &str, path: &Path, format: &str) -> Result<()> {
     if config.is_null() {
         return Err("agent configuration missing".into());
     }
+    #[cfg(target_os = "linux")]
+    let config = {
+        let mut config = config;
+        if home == Path::new("/var/lib/soli-engine") {
+            use std::os::unix::fs::MetadataExt;
+            let parent = path.parent().ok_or("host config parent required")?;
+            let owner = std::fs::metadata(path).or_else(|_| std::fs::metadata(parent))?;
+            let passwd = Command::new("getent")
+                .args(["passwd", &owner.uid().to_string()])
+                .output()?;
+            if !passwd.status.success() {
+                return Err("host config owner has no account home".into());
+            }
+            let record = String::from_utf8(passwd.stdout)?;
+            let user_home = PathBuf::from(
+                record
+                    .trim()
+                    .split(':')
+                    .nth(5)
+                    .ok_or("host owner home missing")?,
+            );
+            if !user_home.is_absolute() || user_home == Path::new("/") {
+                return Err("invalid host owner home".into());
+            }
+            let export_dir = user_home.join(".soli-agent-credentials");
+            if !export_dir.exists() {
+                std::fs::create_dir(&export_dir)?;
+                protect(&export_dir)?;
+                run(Command::new("chown")
+                    .arg(format!("{}:{}", owner.uid(), owner.gid()))
+                    .arg(&export_dir))?;
+            }
+            let meta = std::fs::symlink_metadata(&export_dir)?;
+            if meta.file_type().is_symlink() || !meta.is_dir() || meta.uid() != owner.uid() {
+                return Err("credential export directory ownership mismatch".into());
+            }
+            let file = export_dir.join(format!("{name}.json"));
+            write(
+                &file,
+                &std::fs::read(home.join(format!("credentials/{name}.json")))?,
+            )?;
+            config["command"] = json!("/opt/soli/bin/soli-agent");
+            config["env"]["SOLI_CREDENTIAL_FILE"] = json!(file);
+        }
+        config
+    };
     let current = std::fs::read_to_string(path).unwrap_or_default();
     if format == "json" {
         let mut doc: Value = if current.trim().is_empty() {
@@ -579,6 +746,56 @@ fn disconnect_all(home: &Path) -> Result<()> {
     }
     Ok(())
 }
+fn setup_wallet(engine: &Path, signer: &Path, settings: &BTreeMap<String, String>) -> Result<()> {
+    if !signer.is_absolute()
+        || !signer.is_dir()
+        || engine.canonicalize()? == signer.canonicalize()?
+    {
+        return Err("use an existing separate absolute signer home".into());
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        if std::fs::metadata(engine)?.uid() == std::fs::metadata(signer)?.uid() {
+            return Err("engine and signer homes must belong to different accounts".into());
+        }
+    }
+    let mut s = profile(signer, "signer")?;
+    let key = zeroize::Zeroizing::new(rpassword::prompt_password(
+        "Wallet private key (hidden; Enter keeps imported key): ",
+    )?);
+    let expected = rpassword::prompt_password("Expected public wallet (Enter keeps current): ")?;
+    if !key.is_empty() {
+        s.insert("SOLI_PRIVATE_KEY".into(), key.to_string());
+    }
+    if !expected.is_empty() {
+        s.insert("SOLI_EXPECTED_WALLET".into(), expected);
+    }
+    let verified = crate::local_key::LocalKey::decode(
+        s.get("SOLI_PRIVATE_KEY").ok_or("wallet key missing")?,
+        s.get("SOLI_EXPECTED_WALLET")
+            .ok_or("expected wallet missing")?,
+    )?;
+    verified.verify()?;
+    for name in [
+        "SOLI_API_TOKEN",
+        "SOLI_RPC_URL",
+        "JUPITER_API_KEY",
+        "GOPLUS_APP_KEY",
+        "GOPLUS_APP_SECRET",
+        "GOPLUS_TOKEN",
+    ] {
+        if let Some(v) = settings.get(name) {
+            s.insert(name.into(), v.clone());
+        }
+    }
+    save_profile(signer, "signer", &s)?;
+    println!(
+        "Wallet verified: {}. Live flag and spending limits preserved.",
+        verified.wallet()
+    );
+    Ok(())
+}
 pub async fn command(args: &[String]) -> Result<()> {
     let home = home()?;
     let arg = |n: usize| {
@@ -587,9 +804,15 @@ pub async fn command(args: &[String]) -> Result<()> {
             .ok_or("missing command argument")
     };
     match args[0].as_str() {
+        "up" | "down" | "restart" => lifecycle(&home, &args[0]).await?,
         "setup" => {
-            let agent = args.get(1).map(String::as_str).unwrap_or("default");
-            if !home.join("engine.json").exists() && !home.join(".env").exists() {
+            let agent = args
+                .get(1)
+                .filter(|s| !s.starts_with("--"))
+                .map(String::as_str)
+                .unwrap_or("default");
+            id(agent)?;
+            if !binary(&home).exists() || !home.join("agents.json").exists() {
                 Box::pin(command(&["install".into(), agent.into()])).await?;
             }
             println!("Soli setup: hidden local input; Enter preserves existing settings.");
@@ -611,9 +834,110 @@ pub async fn command(args: &[String]) -> Result<()> {
                     settings.insert(name.into(), value.to_string());
                 }
             }
+            for name in [
+                "SOLI_WALLET_ADDRESS",
+                "SOLI_WATCH_MINTS",
+                "SOLI_SMART_WALLETS",
+            ] {
+                if let Some(value) = settings.get(name) {
+                    for mint in value.split(',').map(str::trim).filter(|v| !v.is_empty()) {
+                        if !soli_agent::valid_mint(mint) {
+                            return Err(format!("invalid public address in {name}").into());
+                        }
+                    }
+                }
+            }
+            if !settings.contains_key("SOLI_ENTRY_TRIGGER") {
+                settings.insert(
+                    "SOLI_ENTRY_TRIGGER".into(),
+                    if settings
+                        .get("SOLI_SMART_WALLETS")
+                        .is_some_and(|v| !v.is_empty())
+                    {
+                        "wallet_convergence"
+                    } else {
+                        "momentum"
+                    }
+                    .into(),
+                );
+            }
+            let mode =
+                rpassword::prompt_password("Paper mode manual/semi/full (Enter keeps current): ")?;
+            let entry =
+                rpassword::prompt_password("Paper entry USDC 1..100 (Enter keeps current): ")?;
+            if !mode.is_empty() && !["manual", "semi", "full"].contains(&mode.as_str()) {
+                return Err("invalid paper mode".into());
+            }
+            let amount = if entry.is_empty() {
+                None
+            } else {
+                Some(
+                    entry
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|v| (1..=100).contains(v))
+                        .ok_or("entry must be 1..100 USDC")?,
+                )
+            };
+            if (!mode.is_empty() || amount.is_some())
+                && settings.get("SOLI_DRY_RUN").is_some_and(|v| v == "false")
+            {
+                return Err("paper setup cannot change live trading controls".into());
+            }
             save_profile(&home, "engine", &settings)?;
-            stop(&home, "engine")?;
-            start(&home, "engine").await?;
+            if let Some(amount) = amount {
+                let path = Path::new(
+                    settings
+                        .get("SOLI_STRATEGY_FILE")
+                        .ok_or("strategy path required")?,
+                );
+                let mut strategy: crate::research::Strategy =
+                    serde_json::from_slice(&std::fs::read(path)?)?;
+                strategy.entry_usdc = amount * 1_000_000;
+                strategy.validate()?;
+                write(path, &serde_json::to_vec_pretty(&strategy)?)?;
+            }
+            if let Some(i) = args.iter().position(|s| s == "--signer-home") {
+                setup_wallet(
+                    &home,
+                    Path::new(args.get(i + 1).ok_or("signer home required")?),
+                    &settings,
+                )?;
+            }
+            lifecycle(&home, "restart").await?;
+            if !mode.is_empty() || amount.is_some() {
+                let current = api(&home, "/v1/lifecycle", None).await?;
+                let selected = if mode.is_empty() {
+                    current["lifecycle"]["mode"].as_str().unwrap_or("manual")
+                } else {
+                    &mode
+                };
+                let amount = amount.unwrap_or(
+                    current["lifecycle"]["entry_usdc"]
+                        .as_u64()
+                        .unwrap_or(1_000_000)
+                        / 1_000_000,
+                );
+                api(
+                    &home,
+                    "/v1/lifecycle/control",
+                    Some(json!({"action":"mode","args":[selected,"168",&amount.to_string()]})),
+                )
+                .await?;
+            }
+            for (flag, format) in [("--host-json", "json"), ("--host-toml", "toml")] {
+                if let Some(i) = args.iter().position(|s| s == flag) {
+                    if !home.join(format!("credentials/{agent}.json")).exists() {
+                        add_agent(&home, agent, "preview", false)?;
+                    }
+                    connect(
+                        &home,
+                        agent,
+                        Path::new(args.get(i + 1).ok_or("host config path required")?),
+                        format,
+                    )?;
+                }
+            }
             println!(
                 "Engine running. MCP configuration: {}",
                 home.join(format!("mcp-{agent}.json")).display()
@@ -653,6 +977,23 @@ pub async fn command(args: &[String]) -> Result<()> {
                 )?;
                 save(&home.join("agents.json"), &json!([]))?;
                 save(&home.join("notifications.json"), &json!([]))?;
+            }
+            if home.join(".env").exists() {
+                let mut active = profile(&home, "engine")?;
+                let defaults: BTreeMap<String, String> =
+                    serde_json::from_value(load(&home.join("engine.json"))?)?;
+                for (name, value) in defaults {
+                    if active.get(&name).is_none_or(|v| v.is_empty()) {
+                        active.insert(name, value);
+                    }
+                }
+                if active
+                    .get("SOLI_API_TOKEN")
+                    .is_none_or(|v| v.len() < 32 || v.starts_with("replace-"))
+                {
+                    active.insert("SOLI_API_TOKEN".into(), token());
+                }
+                save_profile(&home, "engine", &active)?;
             }
             if profile(&home, "engine")?
                 .get("SOLI_DRY_RUN")
@@ -775,8 +1116,10 @@ pub async fn command(args: &[String]) -> Result<()> {
             println!("Notification configured; restart engine to load its secret");
         }
         "connect" => connect(&home, arg(1)?, Path::new(arg(2)?), arg(3)?)?,
-        "start" => start(&home, args.get(1).map(String::as_str).unwrap_or("engine")).await?,
-        "stop" => stop(&home, args.get(1).map(String::as_str).unwrap_or("engine"))?,
+        "start" if args.len() == 1 => lifecycle(&home, "up").await?,
+        "stop" if args.len() == 1 => lifecycle(&home, "down").await?,
+        "start" => start(&home, arg(1)?).await?,
+        "stop" => stop(&home, arg(1)?)?,
         "run" => {
             let role = arg(1)?;
             if !["engine", "signer"].contains(&role) {
@@ -800,19 +1143,37 @@ pub async fn command(args: &[String]) -> Result<()> {
                 .create(true)
                 .append(true)
                 .open(home.join(format!("{role}.log")))?;
-            let mut child = spawned(&home, role)?
-                .stdout(logfile.try_clone()?)
-                .stderr(logfile)
-                .spawn()?;
-            std::thread::sleep(Duration::from_millis(50));
-            save(
-                &file,
-                &json!({"wrapper":stamp(std::process::id())?,"child":stamp(child.id())?}),
-            )?;
-            let status = child.wait()?;
-            let _ = std::fs::remove_file(file);
-            if !status.success() {
-                return Err("service exited unsuccessfully; inspect private log".into());
+            let stop_marker = home.join(format!("{role}.stop"));
+            let _ = std::fs::remove_file(&stop_marker);
+            loop {
+                if stop_marker.exists() {
+                    let _ = std::fs::remove_file(&file);
+                    break;
+                }
+                let mut child = spawned(&home, role)?
+                    .env("SOLI_SUPERVISED", "true")
+                    .stdout(logfile.try_clone()?)
+                    .stderr(logfile.try_clone()?)
+                    .spawn()?;
+                std::thread::sleep(Duration::from_millis(50));
+                save(
+                    &file,
+                    &json!({"wrapper":stamp(std::process::id())?,"child":stamp(child.id())?}),
+                )?;
+                let status = child.wait()?;
+                if stop_marker.exists() {
+                    let _ = std::fs::remove_file(&file);
+                    break;
+                }
+                if role == "engine" && status.code() == Some(75) {
+                    // Intentional settings/learning reload only; ordinary failures remain visible.
+                    continue;
+                }
+                let _ = std::fs::remove_file(&file);
+                if !status.success() {
+                    return Err("service exited unsuccessfully; inspect private log".into());
+                }
+                break;
             }
         }
         "doctor" => {

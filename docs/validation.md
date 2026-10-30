@@ -1,11 +1,15 @@
 # Validation status — 2026-10-30
 
-Latest local run: **40 Rust checks passed** across ledger, engine/adapter/policy,
+Latest local run: **43 Rust checks and 4 optional-adapter checks passed** across ledger, engine/adapter/policy,
 deployment helper and native installation acceptance. Formatting and Clippy with
 warnings denied passed. The earlier locked dependency audit reported no advisories;
 that result is not a fresh audit of later dependency changes.
 Native installation and MCP-to-engine status were exercised in the local checkout;
 the temporary background engine was stopped after verification.
+Acceptance also exercises idempotent application startup, settings authorization,
+validated child reload without replacing the supervisor, persisted pause/halt, and
+shutdown without an orphan engine. Adapter checks cover DM identity/confirmation,
+shared-card refusal, owner rejection and headless fallback using stdlib unittest.
 
 Engine, MCP, installer and acceptance checks are native Rust. Python implementations
 were removed; only an optional Hermes registration shim uses Python for its host API.

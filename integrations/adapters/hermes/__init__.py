@@ -12,6 +12,52 @@ def _run(args, payload=None):
     return result.stdout.strip() if result.returncode == 0 else "Soli rejected the request; check its configuration."
 
 
+def _display(text):
+    try:
+        return _run(["format"], json.loads(text))
+    except (ValueError, TypeError):
+        return text
+
+
+def _private(source, platform):
+    chat = str(getattr(source, "chat_id", ""))
+    user = str(getattr(source, "user_id", ""))
+    if platform == "slack":
+        return chat.startswith("D")
+    if platform == "telegram":
+        return chat == user
+    if platform in ("whatsapp", "whatsapp_cloud"):
+        return chat == user and not chat.endswith("@g.us")
+    return platform == "discord" and getattr(source, "chat_type", "") == "dm"
+
+
+def _menu(ctx, raw_args="", *, source=None, platform="", **kwargs):
+    fallback = _run(["menu"])
+    if source is None or not callable(getattr(ctx, "ask_choice", None)):
+        return fallback
+    platform = getattr(platform or getattr(source, "platform", ""), "value", platform or getattr(source, "platform", ""))
+    catalogue = json.loads(_run(["menu-json"]))
+    groups = catalogue["groups"]
+    picked = ctx.ask_choice("Soli — pilih menu", [{"label":g["label"], "value":str(i)} for i,g in enumerate(groups)])
+    if picked not in [str(i) for i in range(len(groups))]:
+        return fallback
+    items = groups[int(picked)]["items"]
+    selected = ctx.ask_choice(groups[int(picked)]["label"], [{"label":a["label"],"value":str(i)} for i,a in enumerate(items)])
+    if selected not in [str(i) for i in range(len(items))]:
+        return fallback
+    action = items[int(selected)]
+    if action["write"]:
+        owners = json.loads(os.environ.get("SOLI_OWNERS_JSON", "{}"))
+        if str(getattr(source,"user_id","")) not in owners.get(platform, []):
+            return "Kontrol ini hanya untuk owner Soli."
+        # A shared card does not prove who tapped it; require a fresh native owner command there.
+        if not _private(source, platform):
+            return "Kirim command owner ini di chat yang sama: /soli " + action["command"]
+        if ctx.ask_choice("Jalankan " + action["label"] + "?", [{"label":"Jalankan","value":"yes"},{"label":"Batal","value":"no"}]) != "yes":
+            return "Dibatalkan."
+    return _command(action["command"], source=source, platform=platform)
+
+
 def _command(raw_args, *, source=None, platform="", **kwargs):
     if source is None:
         return "Soli requires an authenticated native transport session."
@@ -23,14 +69,14 @@ def _command(raw_args, *, source=None, platform="", **kwargs):
         return "Invalid command quoting; use /soli menu."
     if words and words[0] == "menu":
         return _run(["menu"])
-    if not words or words[0] in ("status", "lifecycle", "report", "wallet", "positions", "pnl", "position", "learning", "candidates"):
+    if not words or words[0] in ("status", "lifecycle", "report", "wallet", "positions", "pnl", "position", "learning", "candidates") or words == ["settings"]:
         if words and words[0] == "candidates":
             words[0] = "live-candidates"
-        return _run(words or ["status"])
-    return _run(["connector"], {"event_id":"native", "platform":getattr(platform,"value",platform),
+        return _display(_run(words or ["status"]))
+    return _display(_run(["connector"], {"event_id":"native", "platform":getattr(platform,"value",platform),
         "user_id":str(getattr(source,"user_id","") or ""), "conversation_id":str(getattr(source,"chat_id","") or ""),
         "thread_id":str(thread) if thread is not None else None,
-        "command":words[0] if words else "status", "arguments":words[1:]})
+        "command":words[0] if words else "status", "arguments":words[1:]}))
 
 
 def _read(args, **kwargs):
@@ -39,9 +85,13 @@ def _read(args, **kwargs):
 
 
 def register(ctx):
-    ctx.register_command("soli-menu", handler=lambda *args, **kwargs: _run(["menu"]), description="List Soli commands")
-    ctx.register_command("soli_menu", handler=lambda *args, **kwargs: _run(["menu"]), description="List Soli commands (Telegram)")
-    ctx.register_command("soli", handler=_command, description="Soli native Rust connector", args_hint="<command and arguments>")
+    def menu(args="", **kwargs):
+        return _menu(ctx, args, **kwargs)
+    def command(args="", **kwargs):
+        return menu(args, **kwargs) if args.strip() in ("", "menu") else _command(args, **kwargs)
+    ctx.register_command("soli-menu", handler=menu, description="Open Soli menu")
+    ctx.register_command("soli_menu", handler=menu, description="Open Soli menu (Telegram)")
+    ctx.register_command("soli", handler=command, description="Soli native Rust connector", args_hint="<command and arguments>")
     ctx.register_tool(name="soli_read", toolset="soli", handler=_read,
         schema={"name":"soli_read","description":"Read Soli status/report; cannot authorize trades.",
             "parameters":{"type":"object","properties":{"action":{"type":"string","enum":["status","report"]}},"additionalProperties":False}})

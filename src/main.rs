@@ -9,12 +9,14 @@ mod learning;
 mod live;
 mod local_key;
 mod mcp;
+mod menu;
 mod notify;
 mod operator;
 mod paper_cycle;
 mod proxy;
 mod readiness;
 mod research;
+mod settings;
 mod signals;
 mod vault_admin;
 mod wallet;
@@ -126,12 +128,15 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
 }
 
 async fn status(State(app): State<App>) -> ApiResult {
-    let lifecycle = if app.live_enabled {
+    let mut lifecycle = if app.live_enabled {
         Value::Null
     } else {
         serde_json::to_value(paper_cycle::settings(&app).map_err(bad)?)
             .map_err(|_| bad("lifecycle encoding failed"))?
     };
+    if !app.live_enabled {
+        lifecycle["effective_entry_usdc"] = json!(paper_cycle::amount(&app));
+    }
     let store = app
         .store
         .lock()
@@ -353,6 +358,19 @@ async fn market(State(app): State<App>, Path(mint): Path<String>) -> ApiResult {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    if args.first().is_some_and(|a| a == "menu-json") {
+        println!("{}", menu::catalogue());
+        return Ok(());
+    }
+    if args.first().is_some_and(|a| a == "format") {
+        use std::io::Read;
+        let mut input = String::new();
+        std::io::stdin()
+            .take(1_000_000)
+            .read_to_string(&mut input)?;
+        println!("{}", menu::render(&serde_json::from_str(&input)?));
+        return Ok(());
+    }
     if args
         .first()
         .is_some_and(|a| ["menu", "soli-menu"].contains(&a.as_str()))
@@ -503,6 +521,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let mut routes = Router::new()
         .route("/v1/status", get(status))
+        .route("/v1/settings", get(settings::read).post(settings::update))
         .route("/v1/lifecycle", get(paper_cycle::status))
         .route("/v1/lifecycle/control", post(paper_cycle::control))
         .route("/v1/learning", get(learning::status))
@@ -608,6 +627,7 @@ async fn client_command(token: &str, args: &[String]) -> Result<(), Box<dyn std:
     let base = "http://127.0.0.1:8787";
     let request = match args[0].as_str() {
         "status" if args.len() == 1 => http.get(format!("{base}/v1/status")),
+        "settings" if args.len() == 1 => http.get(format!("{base}/v1/settings")),
         "lifecycle" if args.len()==1=>http.get(format!("{base}/v1/lifecycle")),
         "learning" if args.len()==1=>http.get(format!("{base}/v1/learning")),
         "wallet"|"positions"|"pnl" if args.len()==1=>http.get(format!("{base}/v1/wallet")),

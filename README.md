@@ -8,6 +8,10 @@ Local `.env` or Vault-backed signing runs as a
 separate process. No wallets or credentials are included.
 
 **Installing from an agent? Read [INSTALL.md](INSTALL.md), then [SKILL.md](SKILL.md).**
+For a guided local install use `soli-agent setup my-agent`, then `soli-agent up`.
+`/soli-menu` opens native choices in compatible chat hosts; `menu-json` exposes
+the same catalogue for other agents. Public paper settings reload through the
+native supervisor. See [commands](docs/commands.md) for owner controls and limits.
 For everyday status, research and paper-trading workflows, see the [user guide](docs/user-guide.md).
 The repository contains installation instructions for terminal-capable agents and
 a stdio MCP adapter. Host-specific settings still follow the host's own format.

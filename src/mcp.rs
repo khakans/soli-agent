@@ -45,7 +45,20 @@ pub fn credential() -> Result<String, String> {
             .map(String::from)
             .ok_or("credential missing from file".into());
     }
-    std::env::var("SOLI_API_TOKEN").map_err(|_| "engine credential missing".into())
+    if let Ok(token) = std::env::var("SOLI_API_TOKEN") {
+        return Ok(token);
+    }
+    // Local CLI convenience uses a scoped credential, never an implicit master token.
+    let home = crate::operator::home().map_err(|_| "credential home unavailable")?;
+    let value: Value = serde_json::from_slice(
+        &std::fs::read(home.join("credentials/default.json"))
+            .map_err(|_| "configure SOLI_CREDENTIAL_FILE or install the default local agent")?,
+    )
+    .map_err(|_| "invalid local credential file")?;
+    value["token"]
+        .as_str()
+        .map(String::from)
+        .ok_or("local credential missing".into())
 }
 pub async fn api(path: &str, body: Option<Value>) -> Result<Value, String> {
     let token = credential()?;
@@ -89,7 +102,9 @@ impl Soli {
         description = "List Soli commands for any host or transport. Read-only; no trading authority."
     )]
     async fn soli_menu(&self) -> CallToolResult {
-        CallToolResult::success(vec![ContentBlock::text(crate::wallet::MENU)])
+        let mut result = CallToolResult::success(vec![ContentBlock::text(crate::wallet::MENU)]);
+        result.structured_content = Some(crate::menu::catalogue());
+        result
     }
     #[tool(
         description = "Read mode, portfolio, reports and evidence. Views: status, lifecycle (paper), wallet, positions, pnl, learning, report, daily, live-status, live-candidates, performance, notifications, readiness. Live execution requires separate owner authorization, including a bounded mandate for full mode."
@@ -97,6 +112,7 @@ impl Soli {
     async fn soli_status(&self, Parameters(r): Parameters<Read>) -> CallToolResult {
         let path = match r.view.as_deref().unwrap_or("status") {
             "status" => "/v1/status",
+            "settings" => "/v1/settings",
             "lifecycle" => "/v1/lifecycle",
             "report" => "/v1/report",
             "daily" => "/v1/reports/daily",

@@ -48,7 +48,7 @@ Other host settings are preserved; conflicts are rejected for review. The TOML
 format uses `[mcp_servers.soli]`, following the
 [official Codex MCP documentation](https://learn.chatgpt.com/docs/extend/mcp).
 Use the actual host's supported format and reload its MCP connection afterward.
-Tools: `soli_status`, `soli_token`, `soli_preview`, `soli_paper_fill`.
+Tools: `soli_menu`, `soli_status`, `soli_token`, `soli_preview`, `soli_paper_fill`.
 Verify discovery and status before claiming that a particular host works.
 
 ## Configure locally
@@ -56,6 +56,23 @@ Verify discovery and status before claiming that a particular host works.
 `soli-agent setup my-agent` combines installation, hidden provider/address prompts,
 engine restart and provider acceptance. Enter preserves existing settings. It
 does not activate live trading or import a signing key into the engine.
+
+Optional `--host-json /absolute/host.json` or `--host-toml /absolute/config.toml`
+connects the scoped agent in the same wizard. On the managed Linux installation,
+run setup as the operator with sudo; credential export is private to the host
+config's OS owner. Optional `--signer-home /var/lib/soli-signer` verifies/imports
+a key through hidden terminal input into the existing separate signer profile,
+preserving live flags and limits. Separate accounts/services must already exist;
+this does not grant a model access to private service profiles.
+
+`soli-agent up`, `down`, and `restart` manage the application. `start` / `stop`
+without a role are aliases. Local paper needs only the engine. On the managed
+Linux VPS, `sudo /opt/soli/bin/soli-agent up` starts the fixed signer service first
+only when existing configuration explicitly selects live, checks its health,
+then starts the engine. Paper startup leaves the signer alone. Other live installs
+must provision their separate signer service first. No command changes live flags.
+Native `run engine` supervises settings/learning reloads (exit 75); pause, fills
+and submission journals persist. `down` stops reloads before exiting.
 
 Native trusted connector shortcuts: `mode full` selects a 24-hour, 1-USDC mandate;
 `pause` and `resume-cycle` default to all automation. A buy preview accepts exact

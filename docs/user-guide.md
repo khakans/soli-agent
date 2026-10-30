@@ -4,6 +4,22 @@ Soli adalah engine spot memecoin Solana. Mode bawaan adalah **dry run**: saldo d
 
 ## Mulai dari status
 
+`/soli-menu` sekarang memakai pilihan native: tombol pada Slack, Telegram dan
+Discord, serta daftar bernomor pada WhatsApp. Pilih Status & wallet, Mode & pause,
+Tutup posisi, atau Pengaturan. Di DM, aksi owner meminta konfirmasi. Di channel,
+aksi baca bisa dipilih langsung; aksi perubahan menampilkan command yang harus
+dikirim owner agar klik anggota lain tidak memakai identitas pemilik menu.
+
+Untuk instalasi lokal baru: `soli-agent setup my-agent`, lalu `soli-agent up`.
+`down` menghentikan aplikasi dan `restart` memuatnya kembali. Pada VPS managed,
+operator menggunakan `sudo /opt/soli/bin/soli-agent up`; akun service dan signer
+tetap terpisah. Wizard mempertahankan konfigurasi saat Enter ditekan.
+
+`/soli settings` menampilkan strategi publik. Dalam paper, owner dapat memakai
+`/soli settings set entry 1.25USDC`, `settings set stop-loss 15`, atau
+`settings set take-profit 30`. Supervisor native memuat ulang pengaturan tanpa
+mereset pause, posisi atau ledger. Batas strategi dan mandat mode sama-sama berlaku.
+
 Minta menu dan status untuk melihat command yang tersedia serta keadaan engine saat ini:
 
 ```text

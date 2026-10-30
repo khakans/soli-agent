@@ -10,6 +10,22 @@ are `soli-agent wallet`, `position MINT`, `learning`, `report` and `live-candida
 Missing receipt history shows unavailable PnL; paper money is never presented
 as the real wallet balance. A wallet can hold tokens not managed by Soli.
 
+`/soli-menu` opens grouped native choices: buttons on Slack, Telegram and Discord;
+numbered choices on WhatsApp and other text surfaces. Rust `menu-json` and MCP
+`soli_menu` structured content expose the same catalogue to other hosts. Headless
+callers retain the plain command list. Mutations require the configured owner,
+an individual DM and confirmation. Shared-channel menus show the native owner
+command to send; another member tapping a card cannot borrow the initiating
+owner's authority. These native controls need no LLM.
+
+`/soli settings` reads public strategy settings. In paper the authenticated owner
+may use `/soli settings set entry 1.25USDC`, `stop-loss 15`, `take-profit 30`, or
+`max-hold-hours 6`. The native supervisor reloads validated settings automatically;
+unsupervised `serve` saves them and requires manual restart. Live edits remain
+maintenance operations so existing mandates cannot silently change. Actual paper
+entry remains bounded by both the mode allowance and strategy ceiling, plus fixed
+ledger risk limits. Status, wallet, settings and reports have concise native text.
+
 Authenticated owner commands in live mode:
 
 ```text

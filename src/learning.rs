@@ -121,7 +121,7 @@ pub async fn review(app: &App, allow_apply: bool) -> Result<Value, String> {
     }
     Ok(report)
 }
-fn save(path: &std::path::Path, s: &Strategy) -> Result<(), String> {
+pub(crate) fn save(path: &std::path::Path, s: &Strategy) -> Result<(), String> {
     use std::io::Write;
     let parent = path.parent().ok_or("strategy parent missing")?;
     let mut f = tempfile::NamedTempFile::new_in(parent).map_err(|_| "strategy staging failed")?;

@@ -81,9 +81,11 @@ async fn native_install_scopes_revocation_and_restart() {
     };
     let cleanup = Cleanup(home.clone());
     command(&["install", "test"]);
-    command(&["stop", "engine"]);
+    command(&["down"]);
     assert!(!home.join("engine.pid.json").exists());
-    command(&["start", "engine"]);
+    command(&["up"]);
+    command(&["up"]); // Idempotent start never creates a duplicate engine.
+    command(&["restart"]);
     command(&["doctor", "--agent", "test"]);
     let credential: Value =
         serde_json::from_slice(&std::fs::read(home.join("credentials/test.json")).unwrap())
@@ -224,6 +226,75 @@ async fn native_install_scopes_revocation_and_restart() {
     assert_eq!(cycle["lifecycle"]["mode"], "semi");
     assert_eq!(cycle["lifecycle"]["paused"], true);
     assert_eq!(cycle["lifecycle"]["entry_usdc"], 1_000_000);
+    // An owner settings change reloads the native child, preserving pause and ledger.
+    let before: Value =
+        serde_json::from_slice(&std::fs::read(home.join("engine.pid.json")).unwrap()).unwrap();
+    let settings_url = "http://127.0.0.1:8787/v1/settings";
+    let update = json!({"field":"stop-loss","value":"14"});
+    assert_eq!(
+        http.post(settings_url)
+            .bearer_auth(credential["token"].as_str().unwrap())
+            .json(&update)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    assert!(
+        http.post(settings_url)
+            .bearer_auth(operator)
+            .json(&json!({"field":"stop-loss","value":"NaN"}))
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_client_error()
+    );
+    assert!(
+        http.post(settings_url)
+            .bearer_auth(operator)
+            .json(&update)
+            .send()
+            .await
+            .unwrap()
+            .status()
+            .is_success()
+    );
+    let mut reloaded = false;
+    for _ in 0..100 {
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Ok(r) = http.get(settings_url).bearer_auth(operator).send().await
+            && let Ok(v) = r.json::<Value>().await
+            && v["strategy"]["stop_loss_pct"] == 14.0
+        {
+            reloaded = true;
+            break;
+        }
+    }
+    assert!(reloaded, "supervisor failed to reload validated settings");
+    let mut after: Value = before.clone();
+    for _ in 0..50 {
+        after =
+            serde_json::from_slice(&std::fs::read(home.join("engine.pid.json")).unwrap()).unwrap();
+        if before["child"] != after["child"] {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    assert_eq!(before["wrapper"], after["wrapper"]);
+    assert_ne!(before["child"], after["child"]);
+    let preserved: Value = http
+        .get("http://127.0.0.1:8787/v1/status")
+        .bearer_auth(operator)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(preserved["ledger"]["halted"], true);
+    assert_eq!(preserved["paper_lifecycle"]["paused"], true);
     assert!(
         http.post(control_url)
             .bearer_auth(operator)
@@ -253,6 +324,14 @@ async fn native_install_scopes_revocation_and_restart() {
             .unwrap()
             .status(),
         401
+    );
+    command(&["down"]);
+    assert!(
+        http.get("http://127.0.0.1:8787/health")
+            .send()
+            .await
+            .is_err(),
+        "stop left an orphan engine"
     );
     drop(cleanup);
 }
