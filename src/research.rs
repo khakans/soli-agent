@@ -34,13 +34,13 @@ pub struct Strategy {
 impl Default for Strategy {
     fn default() -> Self {
         Self {
-            version: "momentum-v1".into(),
-            min_liquidity_usd: 100_000.0,
-            min_age_secs: 3600,
-            min_momentum_pct: 2.0,
-            max_momentum_pct: 20.0,
-            min_volume_ratio: 1.5,
-            min_buy_sell_ratio: 1.2,
+            version: "momentum-aggressive-v2".into(),
+            min_liquidity_usd: 25_000.0,
+            min_age_secs: 300,
+            min_momentum_pct: 0.5,
+            max_momentum_pct: 35.0,
+            min_volume_ratio: 1.1,
+            min_buy_sell_ratio: 1.05,
             stop_loss_pct: 15.0,
             take_profit_pct: 30.0,
             max_hold_secs: 21600,
@@ -92,7 +92,7 @@ impl Strategy {
         if old.mint != new.mint
             || stamp < new.timestamp
             || stamp - new.timestamp > self.max_data_age_secs
-            || new.timestamp.saturating_sub(old.timestamp) < 240
+            || new.timestamp.saturating_sub(old.timestamp) < 120
             || new.timestamp - old.timestamp > 420
             || stamp.saturating_sub(new.pair_created_at) < self.min_age_secs
             || new.liquidity_usd < self.min_liquidity_usd
@@ -743,6 +743,33 @@ mod tests {
             source: "test".into(),
         }
     }
+    #[test]
+    fn aggressive_strategy_accepts_lower_thresholds_but_rejects_stale_data() {
+        let strategy = Strategy::default();
+        strategy.validate().unwrap();
+        let configured: Strategy =
+            serde_json::from_str(include_str!("../config/strategy.json")).unwrap();
+        assert_eq!(configured.version, strategy.version);
+        assert_eq!(configured.min_liquidity_usd, strategy.min_liquidity_usd);
+        assert_eq!(configured.min_age_secs, strategy.min_age_secs);
+        assert_eq!(configured.min_momentum_pct, strategy.min_momentum_pct);
+        assert_eq!(configured.max_momentum_pct, strategy.max_momentum_pct);
+        assert_eq!(configured.min_volume_ratio, strategy.min_volume_ratio);
+        assert_eq!(configured.min_buy_sell_ratio, strategy.min_buy_sell_ratio);
+        assert_eq!(configured.max_data_age_secs, strategy.max_data_age_secs);
+
+        let mut old = s(1000, 1.0, 100.0);
+        old.liquidity_usd = 25_000.0;
+        old.pair_created_at = 800;
+        let mut new = s(1180, 1.01, 110.0);
+        new.liquidity_usd = 25_000.0;
+        new.buys_5m = 21;
+        new.sells_5m = 20;
+        new.pair_created_at = 800;
+        assert!(strategy.entry(&old, &new, 1181));
+        assert!(!strategy.entry(&old, &new, 1271));
+    }
+
     #[test]
     fn versioned_strategy_rejects_stale_and_enforces_exits() {
         let p = Strategy::default();
