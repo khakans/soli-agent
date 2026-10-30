@@ -8,6 +8,7 @@ Local `.env` or Vault-backed signing runs as a
 separate process. No wallets or credentials are included.
 
 **Installing from an agent? Read [INSTALL.md](INSTALL.md), then [SKILL.md](SKILL.md).**
+For everyday status, research and paper-trading workflows, see the [user guide](docs/user-guide.md).
 The repository contains installation instructions for terminal-capable agents and
 a stdio MCP adapter. Host-specific settings still follow the host's own format.
 
