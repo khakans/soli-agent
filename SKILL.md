@@ -9,6 +9,12 @@ Soli is a standalone Rust trading service. Your agent supplies the conversationa
 interface; Hermes is optional. Start with [INSTALL.md](INSTALL.md) when asked to
 install this repository. Keep this skill alongside the checkout so links resolve.
 
+For the managed VPS only, use the operator-installed `soli-deploy status` and
+`soli-deploy deploy` helper as described in [deployment](docs/deployment.md).
+This permission covers the dry-run engine only. Never infer access to signer
+files or other sudo commands. Check actual status instead of relying on old
+deployment notes; a successful build alone is not a successful deployment.
+
 For an existing connection, discover the Soli tools available in the host:
 - `soli_status`: portfolio, report, daily snapshots or live signer status.
 - `soli_token`: risk, market, samples or signal replay for a mint.

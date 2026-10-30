@@ -114,6 +114,10 @@ services and registered Soli host entries, preserving journals, credentials and 
 
 ## Live and optional adapters
 
+On the managed VPS, the operator can install the repo's restricted Rust
+[engine deployment helper](docs/deployment.md). It lets an agent verify and
+update only the dry-run engine; signer and wallet access are not delegated.
+
 Read [operations](docs/operations.md). The signer needs a different OS account
 and private state. Choose local key custody in its private `.env`, or Vault
 Transit. Keep model hosts away from both service profiles.
