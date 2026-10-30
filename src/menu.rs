@@ -16,6 +16,7 @@ pub fn catalogue() -> Value {
             {"label":"Lanjut entry","command":"resume-cycle entries","write":true},
             {"label":"Lanjut otomatisasi","command":"resume-cycle all","write":true}]},
         {"label":"Tutup posisi","items":[
+            {"label":"Tutup satu posisi Soli","command":"force-close {mint} CONFIRM","write":true,"input":"tracked-position"},
             {"label":"Tutup semua posisi Soli","command":"close-all CONFIRM","write":true}]},
         {"label":"Pengaturan","items":[
             {"label":"Lihat pengaturan","command":"settings","write":false},
@@ -37,7 +38,9 @@ fn amount(v: &Value, decimals: u32) -> String {
     let Some(n) = number(v) else {
         return "belum tersedia".into();
     };
-    let base = 10u128.pow(decimals);
+    let Some(base) = 10u128.checked_pow(decimals) else {
+        return format!("{n}e-{decimals}");
+    };
     let magnitude = n.unsigned_abs();
     format!(
         "{}{}.{:0width$}",
@@ -75,7 +78,7 @@ pub fn render(v: &Value) -> String {
         .as_str()
         .filter(|_| v.get("balance_sol_lamports").is_some())
     {
-        return format!(
+        let mut text = format!(
             "Wallet: {wallet}\nSOL: {}\nAkun token berisi saldo: {}\nPosisi paper: {}\nPnL live: {} USDC\nPaper dan wallet asli dihitung terpisah.",
             amount(&v["balance_sol_lamports"], 9),
             v["token_accounts"].as_array().map_or(0, Vec::len),
@@ -84,6 +87,42 @@ pub fn render(v: &Value) -> String {
                 .map_or(0, serde_json::Map::len),
             amount(&v["live"]["pnl"]["realized_usdc_atomic"], 6)
         );
+        if let Some(tokens) = v["token_accounts"].as_array() {
+            for token in tokens.iter().take(20) {
+                let mint = token["mint"]
+                    .as_str()
+                    .filter(|m| soli_agent::valid_mint(m))
+                    .unwrap_or("unknown mint");
+                let decimals = token["balance"]["decimals"]
+                    .as_u64()
+                    .and_then(|n| u32::try_from(n).ok())
+                    .unwrap_or(0);
+                text.push_str(&format!(
+                    "\n{mint}: {}",
+                    amount(&token["balance"]["amount"], decimals)
+                ));
+            }
+        }
+        if let Some(positions) = v["paper"]["positions"].as_object() {
+            for (mint, p) in positions {
+                text.push_str(&format!(
+                    "\nPaper {mint}: {} raw token · biaya {} USDC",
+                    p["amount"],
+                    amount(&p["cost_usdc"], 6)
+                ));
+            }
+        }
+        if let Some(positions) = v["live"]["marks"]["positions"].as_array() {
+            for p in positions {
+                text.push_str(&format!(
+                    "\nLive {} · nilai {} USDC · unrealized {} USDC",
+                    p["mint"].as_str().unwrap_or("unknown"),
+                    amount(&p["liquidation_usdc_atomic"], 6),
+                    amount(&p["unrealized_pnl_usdc_atomic"], 6)
+                ));
+            }
+        }
+        return text;
     }
     if v.get("ledger").is_some() {
         let s = &v["paper_lifecycle"];
@@ -133,6 +172,28 @@ pub fn render(v: &Value) -> String {
         );
     }
     serde_json::to_string_pretty(v).unwrap_or_default()
+}
+pub async fn positions() -> Result<Value, String> {
+    let status = crate::mcp::api("/v1/status", None).await?;
+    let (data, key) = if status["live_enabled"] == true {
+        (
+            crate::mcp::api("/v1/live/status", None).await?,
+            "tracked_positions",
+        )
+    } else {
+        (status["ledger"].clone(), "positions")
+    };
+    let rows = data[key]
+        .as_object()
+        .map(|positions| {
+            positions
+                .keys()
+                .filter(|m| soli_agent::valid_mint(m))
+                .map(|m| json!({"mint":m,"label":m,"command":format!("force-close {m} CONFIRM")}))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    Ok(json!({"positions":rows,"scope":"tracked positions only"}))
 }
 #[cfg(test)]
 mod tests {

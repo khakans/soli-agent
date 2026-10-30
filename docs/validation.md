@@ -1,6 +1,6 @@
 # Validation status — 2026-10-30
 
-Latest local run: **43 Rust checks and 4 optional-adapter checks passed** across ledger, engine/adapter/policy,
+Latest local run: **43 Rust checks and 5 optional-adapter checks passed** across ledger, engine/adapter/policy,
 deployment helper and native installation acceptance. Formatting and Clippy with
 warnings denied passed. The earlier locked dependency audit reported no advisories;
 that result is not a fresh audit of later dependency changes.

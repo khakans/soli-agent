@@ -46,6 +46,14 @@ def _menu(ctx, raw_args="", *, source=None, platform="", **kwargs):
     if selected not in [str(i) for i in range(len(items))]:
         return fallback
     action = items[int(selected)]
+    if action.get("input") == "tracked-position":
+        positions = json.loads(_run(["position-menu"]))["positions"]
+        if not positions:
+            return "Soli belum punya posisi yang dikelola."
+        picked = ctx.ask_choice("Pilih posisi Soli", [{"label":p["label"],"value":str(i)} for i,p in enumerate(positions)])
+        if picked not in [str(i) for i in range(len(positions))]:
+            return "Dibatalkan."
+        action = {**action, "command":positions[int(picked)]["command"]}
     if action["write"]:
         owners = json.loads(os.environ.get("SOLI_OWNERS_JSON", "{}"))
         if str(getattr(source,"user_id","")) not in owners.get(platform, []):

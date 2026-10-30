@@ -362,6 +362,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("{}", menu::catalogue());
         return Ok(());
     }
+    if args.first().is_some_and(|a| a == "position-menu") {
+        println!("{}", menu::positions().await?);
+        return Ok(());
+    }
     if args.first().is_some_and(|a| a == "format") {
         use std::io::Read;
         let mut input = String::new();

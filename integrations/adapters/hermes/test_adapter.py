@@ -53,6 +53,23 @@ class MenuTest(unittest.TestCase):
         with patch.object(adapter,"_run",return_value="commands"):
             self.assertEqual(adapter._menu(SimpleNamespace()),"commands")
 
+    def test_single_close_uses_the_tracked_position(self):
+        mint="So11111111111111111111111111111111111111112"
+        choices=iter(["0","0","0","yes"])
+        ctx=SimpleNamespace(ask_choice=lambda *args:next(choices))
+        source=SimpleNamespace(platform="slack",chat_id="D1",user_id="U1")
+        submitted=[]
+        def run(args,payload=None):
+            if args==["menu"]:return "commands"
+            if args==["menu-json"]:return json.dumps({"groups":[{"label":"Close","items":[{"label":"One","command":"force-close {mint} CONFIRM","write":True,"input":"tracked-position"}]}]})
+            if args==["position-menu"]:return json.dumps({"positions":[{"label":mint,"command":f"force-close {mint} CONFIRM"}]})
+            if args==["connector"]:submitted.append(payload);return "{}"
+            return "done"
+        with patch.object(adapter,"_run",side_effect=run),patch.dict(os.environ,{"SOLI_OWNERS_JSON":'{"slack":["U1"]}'}):
+            adapter._menu(ctx,source=source)
+        self.assertEqual(submitted[0]["command"],"force-close")
+        self.assertEqual(submitted[0]["arguments"],[mint,"CONFIRM"])
+
 
 if __name__ == "__main__":
     unittest.main()
