@@ -221,34 +221,7 @@ async fn deliver(
     payload: &Value,
     secret: &str,
 ) -> Result<(), String> {
-    let text = if payload["kind"] == "lifecycle_report" {
-        let data = &payload["data"];
-        let fresh = data["latest_sample_at"]
-            .as_u64()
-            .is_some_and(|t| now().saturating_sub(t) <= 300);
-        format!(
-            "Laporan lifecycle Soli · {} WIB\n{}\n{}\nData pasar: {}\nSaldo dan PnL paper bukan dana asli; hari laporan mengikuti UTC.",
-            chrono::DateTime::from_timestamp(payload["timestamp"].as_i64().unwrap_or(0), 0)
-                .map(|t| t
-                    .with_timezone(&chrono::FixedOffset::east_opt(25200).unwrap())
-                    .format("%d-%m %H:%M")
-                    .to_string())
-                .unwrap_or_else(|| "waktu tidak tersedia".into()),
-            crate::menu::render(&data["status"]),
-            crate::menu::render(&data["report"]),
-            if fresh {
-                "sampel terbaru tersedia"
-            } else {
-                "belum tersedia atau lebih dari 5 menit; valuasi bisa kedaluwarsa"
-            }
-        )
-    } else {
-        format!(
-            "Soli · {}\n{}",
-            payload["kind"].as_str().unwrap_or("event"),
-            serde_json::to_string(&payload["data"]).unwrap_or_default()
-        )
-    };
+    let text = crate::menu::notification(payload, now());
     let request=match t.kind.as_str() {
         "slack"=>http.post("https://slack.com/api/chat.postMessage").bearer_auth(secret).json(&json!({"channel":t.destination,"text":text,"unfurl_links":false,"unfurl_media":false})),
         "telegram"=>http.post(format!("https://api.telegram.org/bot{secret}/sendMessage")).json(&json!({"chat_id":t.destination,"text":text.chars().take(3900).collect::<String>()})),

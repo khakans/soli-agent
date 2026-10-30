@@ -54,7 +54,158 @@ fn amount(v: &Value, decimals: u32) -> String {
         width = decimals as usize
     )
 }
+fn money(v: &Value) -> String {
+    let text = amount(v, 6);
+    if text.contains('.') {
+        text.trim_end_matches('0').trim_end_matches('.').to_owned()
+    } else {
+        text
+    }
+}
+fn report_lines(r: &Value) -> String {
+    format!(
+        "Saldo simulasi: {} USDC\nPnL terealisasi hari ini: {} USDC\nTransaksi hari ini: {}\nPenurunan ekuitas: {}",
+        money(&r["paper_cash_usdc_atomic"]),
+        money(&r["paper_realized_pnl_today_usdc_atomic"]),
+        r["paper_fills_today"].as_array().map_or(0, Vec::len),
+        r["peak_to_current_drawdown_pct"]
+            .as_f64()
+            .filter(|n| n.is_finite())
+            .map(|n| format!("{n:.2}%"))
+            .unwrap_or_else(|| "belum tersedia".into())
+    )
+}
+/// Only selected business fields enter chat. Provider responses and audit logs stay on disk.
+pub fn notification(v: &Value, stamp: u64) -> String {
+    let d = &v["data"];
+    let time = chrono::DateTime::from_timestamp(v["timestamp"].as_i64().unwrap_or(0), 0)
+        .map(|t| {
+            t.with_timezone(&chrono::FixedOffset::east_opt(25200).unwrap())
+                .format("%d-%m %H:%M WIB")
+                .to_string()
+        })
+        .unwrap_or_else(|| "waktu belum tersedia".into());
+    match v["kind"].as_str().unwrap_or("") {
+        "lifecycle_report" if d["status"]["live_enabled"] == true => {
+            let l = &d["report"]["live"];
+            format!(
+                "Soli · laporan {time}\n\nMode: trading nyata\nStatus signer: {}\nPosisi dikelola: {}\nGunakan !soli wallet untuk saldo dan PnL terverifikasi.",
+                if l["error"].is_string() {
+                    "belum dapat diverifikasi"
+                } else if l["halted"] == true {
+                    "entry dihentikan"
+                } else {
+                    "tersambung"
+                },
+                l["tracked_positions"]
+                    .as_object()
+                    .map(|p| p.len().to_string())
+                    .unwrap_or_else(|| "belum tersedia".into())
+            )
+        }
+        "lifecycle_report" => {
+            let s = &d["status"];
+            let cycle = &s["paper_lifecycle"];
+            let mode = match cycle["mode"].as_str() {
+                Some("full") => "otomatis penuh",
+                Some("semi") => "entry perlu persetujuan",
+                _ => "manual",
+            };
+            let state = if cycle["paused"] == true {
+                "otomatisasi dijeda"
+            } else if s["ledger"]["halted"] == true {
+                "entry dihentikan"
+            } else if cycle["expires_at"].as_u64().is_some_and(|t| t <= stamp)
+                && cycle["mode"] != "manual"
+            {
+                "izin otomatis sudah berakhir"
+            } else {
+                "berjalan"
+            };
+            let fresh = d["latest_sample_at"]
+                .as_u64()
+                .is_some_and(|t| t <= stamp && stamp - t <= 300);
+            format!(
+                "Soli · laporan {time}\n\nMode: simulasi, {mode}\nStatus: {state}\nEntry per transaksi: {} USDC\nPosisi terbuka: {}\n{}\nData pasar: {}\n\nSimulasi, bukan uang asli. PnL harian mengikuti UTC.",
+                money(
+                    cycle
+                        .get("effective_entry_usdc")
+                        .unwrap_or(&cycle["entry_usdc"])
+                ),
+                s["ledger"]["positions"]
+                    .as_object()
+                    .map_or(0, serde_json::Map::len),
+                report_lines(&d["report"]),
+                if fresh {
+                    "terbaru"
+                } else {
+                    "belum tersedia atau lebih dari 5 menit"
+                }
+            )
+        }
+        "daily_report" => format!(
+            "Soli · laporan harian {} (UTC)\n\n{}\n\nAngka simulasi, bukan saldo wallet asli.",
+            d["date_utc"].as_str().unwrap_or("tanggal belum tersedia"),
+            report_lines(d)
+        ),
+        "paper_entry_filled" | "paper_exit_filled" => {
+            let buy = d["side"] == "buy";
+            format!(
+                "Soli · {} simulasi selesai\n\nToken: {}\nNilai {}: {} USDC\nEstimasi biaya: {} USDC\n\nBukan transaksi uang asli.",
+                if buy { "entry" } else { "exit" },
+                d["mint"]
+                    .as_str()
+                    .filter(|m| soli_agent::valid_mint(m))
+                    .unwrap_or("lihat detail posisi"),
+                if buy { "pembelian" } else { "penjualan" },
+                money(if buy {
+                    &d["input_amount"]
+                } else {
+                    &d["output_amount"]
+                }),
+                money(&d["estimated_fee_usdc"])
+            )
+        }
+        "live_receipt" => format!(
+            "Soli · hasil transaksi nyata\nStatus: {}\nPerubahan USDC: {}\nGunakan !soli wallet untuk detail.",
+            match d["state"].as_str() {
+                Some("finalized") => "terkonfirmasi",
+                Some("failed") => "gagal",
+                _ => "belum dapat dipastikan",
+            },
+            money(&d["usdc_delta_atomic"])
+        ),
+        kind => {
+            let title = match kind {
+                "live_entry_candidate" => "Peluang entry ditemukan; perlu persetujuan owner.",
+                "entry_signal" | "wallet_convergence_decision" => {
+                    "Sinyal entry memenuhi filter; belum berarti transaksi sudah terjadi."
+                }
+                "exit_signal" | "live_exit_recommendation" => {
+                    "Sinyal keluar terdeteksi; cek hasil eksekusinya di posisi."
+                }
+                "drawdown_halt" => "Batas penurunan ekuitas tercapai; entry dihentikan.",
+                "tick_failed" | "data_unavailable" => {
+                    "Pemeriksaan pasar terkendala; entry menunggu data yang valid."
+                }
+                "mark_failed" => {
+                    "Valuasi posisi belum dapat diperbarui; PnL terbaru belum terverifikasi."
+                }
+                _ => "Ada pembaruan status; gunakan !soli status untuk detail.",
+            };
+            let mint = d["mint"]
+                .as_str()
+                .filter(|m| soli_agent::valid_mint(m))
+                .map(|m| format!("\nToken: {m}"))
+                .unwrap_or_default();
+            format!("Soli · pemberitahuan {time}\n\n{title}{mint}")
+        }
+    }
+}
 pub fn render(v: &Value) -> String {
+    if v["kind"].is_string() && v["data"].is_object() {
+        return notification(v, crate::now());
+    }
     if let Some(e) = v.get("error") {
         return format!("Soli: {}", e.as_str().unwrap_or("permintaan ditolak"));
     }
@@ -219,6 +370,42 @@ pub async fn positions() -> Result<Value, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn notifications_never_dump_provider_or_audit_json_and_preserve_exact_values() {
+        let report = json!({"date_utc":"2026-10-29","paper_cash_usdc_atomic":1000000000u64,"paper_realized_pnl_today_usdc_atomic":-1000001,"paper_fills_today":[],"peak_to_current_drawdown_pct":null,"events":[{"goplus":"RAW_PROVIDER_SENTINEL"}]});
+        let daily = notification(
+            &json!({"kind":"daily_report","timestamp":1000,"data":report}),
+            1000,
+        );
+        assert!(daily.contains("1000 USDC") && daily.contains("-1.000001 USDC"));
+        assert!(
+            daily.contains("belum tersedia")
+                && !daily.contains("RAW_PROVIDER_SENTINEL")
+                && daily.len() < 800
+        );
+        let data = json!({"report":report,"latest_sample_at":1000,"status":{"ledger":{"positions":{},"halted":false},"paper_lifecycle":{"mode":"full","paused":false,"effective_entry_usdc":1000000,"expires_at":2000}}});
+        let cycle = notification(
+            &json!({"kind":"lifecycle_report","timestamp":1000,"data":data}),
+            1000,
+        );
+        assert!(
+            cycle.contains("otomatis penuh")
+                && cycle.contains("Status: berjalan")
+                && cycle.contains("Data pasar: terbaru")
+        );
+        assert_eq!(cycle.matches("Saldo simulasi:").count(), 1);
+        assert!(!cycle.contains("false") && !cycle.contains("dry_run") && cycle.len() < 900);
+        let fault = notification(
+            &json!({"kind":"tick_failed","timestamp":1000,"data":{"reason":"RAW_PROVIDER_SENTINEL"}}),
+            1000,
+        );
+        assert!(!fault.contains("RAW_PROVIDER_SENTINEL"));
+        let unknown = notification(
+            &json!({"kind":"future_event","data":{"receipt":"RAW_PROVIDER_SENTINEL"}}),
+            1000,
+        );
+        assert!(!unknown.contains("RAW_PROVIDER_SENTINEL"));
+    }
     #[test]
     fn menu_and_output_preserve_units_and_missing_evidence() {
         assert_eq!(amount(&json!(-1000001), 6), "-1.000001");

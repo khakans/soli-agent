@@ -39,6 +39,9 @@ The durable outbox checks every 10 seconds, retries delivery failures and may
 duplicate delivery if a platform acknowledgement is lost. Configure private
 destinations and credentials through `SOLI_NOTIFICATIONS_FILE`; no destination
 means no delivery. Reports use the Rust engine directly and consume no LLM tokens.
+Chat notifications contain concise Indonesian summaries with readable USDC
+amounts. Provider payloads, audit logs and transaction receipts stay in local
+storage; HTTPS webhook receivers still receive the original structured event.
 
 Authenticated owner commands in live mode:
 
