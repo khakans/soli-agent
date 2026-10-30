@@ -5,8 +5,22 @@ import shlex
 import subprocess
 
 
+def _env(name):
+    # Multiplexed Hermes profiles keep their values outside process-wide environ.
+    from hermes_cli.config import get_env_value
+    return get_env_value(name)
+
+
 def _run(args, payload=None):
-    result = subprocess.run([os.environ["SOLI_BINARY"], *args],
+    binary = _env("SOLI_BINARY")
+    if not binary:
+        return "Soli belum dikonfigurasi di profil agen ini."
+    env = {k:v for k,v in os.environ.items() if k in ("PATH", "SYSTEMROOT", "LANG", "LC_ALL", "TMP", "TEMP")}
+    for name in ("SOLI_CREDENTIAL_FILE", "SOLI_BRIDGE_SECRETS_JSON", "SOLI_OWNERS_JSON"):
+        value = _env(name)
+        if value is not None:
+            env[name] = value
+    result = subprocess.run([binary, *args], env=env,
         input=None if payload is None else json.dumps(payload),
         text=True, capture_output=True, timeout=200)
     return result.stdout.strip() if result.returncode == 0 else "Soli rejected the request; check its configuration."
@@ -55,7 +69,7 @@ def _menu(ctx, raw_args="", *, source=None, platform="", **kwargs):
             return "Dibatalkan."
         action = {**action, "command":positions[int(picked)]["command"]}
     if action["write"]:
-        owners = json.loads(os.environ.get("SOLI_OWNERS_JSON", "{}"))
+        owners = json.loads(_env("SOLI_OWNERS_JSON") or "{}")
         if str(getattr(source,"user_id","")) not in owners.get(platform, []):
             return "Kontrol ini hanya untuk owner Soli."
         # A shared card does not prove who tapped it; require a fresh native owner command there.

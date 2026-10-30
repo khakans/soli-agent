@@ -13,6 +13,20 @@ spec.loader.exec_module(adapter)
 
 
 class MenuTest(unittest.TestCase):
+    def setUp(self):
+        resolver = patch.object(adapter, "_env", side_effect=os.environ.get)
+        resolver.start()
+        self.addCleanup(resolver.stop)
+
+    def test_profile_values_override_process_environment(self):
+        profile = {"SOLI_BINARY":"profile-binary", "SOLI_CREDENTIAL_FILE":"profile-credential", "SOLI_OWNERS_JSON":'{"slack":["owner"]}'}
+        with patch.object(adapter, "_env", side_effect=profile.get), patch.dict(os.environ, {"SOLI_CREDENTIAL_FILE":"wrong-profile", "SOLI_PRIVATE_KEY":"must-not-inherit"}), patch.object(adapter.subprocess, "run", return_value=SimpleNamespace(returncode=0, stdout="commands")) as run:
+            self.assertEqual(adapter._run(["menu"]), "commands")
+        self.assertEqual(run.call_args.args[0], ["profile-binary", "menu"])
+        child = run.call_args.kwargs["env"]
+        self.assertEqual(child["SOLI_CREDENTIAL_FILE"], "profile-credential")
+        self.assertNotIn("SOLI_PRIVATE_KEY", child)
+
     def check_menu(self, platform, chat, user, private, owner=True, confirm="yes"):
         source = SimpleNamespace(platform=platform, chat_id=chat, user_id=user, chat_type="dm")
         choices = iter(["0", "0", confirm])
