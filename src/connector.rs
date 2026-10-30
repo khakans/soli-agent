@@ -7,7 +7,15 @@ pub async fn command() -> Result<(), Box<dyn std::error::Error>> {
     let mut input = String::new();
     std::io::stdin().take(8192).read_to_string(&mut input)?;
     let mut event: crate::bridge::Event = serde_json::from_str(&input)?;
-    if !["slack", "telegram", "discord", "whatsapp", "agent"].contains(&event.platform.as_str())
+    if ![
+        "slack",
+        "telegram",
+        "discord",
+        "whatsapp",
+        "whatsapp_cloud",
+        "agent",
+    ]
+    .contains(&event.platform.as_str())
         || event.user_id.is_empty()
         || event.conversation_id.is_empty()
     {

@@ -39,7 +39,7 @@ queued is not sold.
 Host adapters derive platform/user/chat/thread from the verified transport, not
 model arguments. The Rust connector HMAC-signs it and the service checks owner
 allowlists, timestamps and replay IDs. Platform keys are `slack`, `telegram`,
-`discord`, `whatsapp`, and `agent` for another trusted agent-host adapter. Omit
+`discord`, `whatsapp`, `whatsapp_cloud`, and `agent` for another trusted agent-host adapter. WhatsApp Cloud has its own signing key and owner IDs; its authority is not merged with the regular WhatsApp connection. Omit
 unused platforms; adding a label alone does not connect an external account.
 Each adapter must authenticate its actual user before signing. Models receive
 read/preview/paper MCP credentials, never owner credentials or connector secrets.

@@ -120,7 +120,15 @@ impl Security {
     }
 }
 fn supported(p: &str) -> bool {
-    ["slack", "telegram", "discord", "whatsapp", "agent"].contains(&p)
+    [
+        "slack",
+        "telegram",
+        "discord",
+        "whatsapp",
+        "whatsapp_cloud",
+        "agent",
+    ]
+    .contains(&p)
 }
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 fn error(s: impl ToString) -> (StatusCode, Json<Value>) {
@@ -243,7 +251,14 @@ mod tests {
     use super::*;
     #[test]
     fn transport_rules_and_command_scopes() {
-        for p in ["slack", "telegram", "discord", "whatsapp", "agent"] {
+        for p in [
+            "slack",
+            "telegram",
+            "discord",
+            "whatsapp",
+            "whatsapp_cloud",
+            "agent",
+        ] {
             assert!(supported(p));
         }
         assert!(!supported("cli"));
@@ -261,7 +276,14 @@ mod tests {
     }
     #[test]
     fn signed_identity_timestamp_and_replay_are_enforced() {
-        for platform in ["slack", "telegram", "discord", "whatsapp", "agent"] {
+        for platform in [
+            "slack",
+            "telegram",
+            "discord",
+            "whatsapp",
+            "whatsapp_cloud",
+            "agent",
+        ] {
             let db = Connection::open_in_memory().unwrap();
             db.execute_batch("CREATE TABLE bridge_events(platform TEXT,id TEXT,ts INTEGER,PRIMARY KEY(platform,id));").unwrap();
             let s = Security {

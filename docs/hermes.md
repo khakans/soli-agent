@@ -9,8 +9,8 @@ WhatsApp and other trusted agent hosts. See [universal commands](commands.md).
 Set `SOLI_BINARY`, the agent scoped `SOLI_CREDENTIAL_FILE`, and matching connector secrets in the host and engine. Configure the isolated signer only when the host's permissions are suitable for live owner commands:
 
 ```text
-SOLI_BRIDGE_SECRETS_JSON={"slack":"<random32+>","telegram":"<different32+>","discord":"<different32+>","whatsapp":"<different32+>","agent":"<different32+>"}
-SOLI_OWNERS_JSON={"slack":["U..."],"telegram":["123456789"],"discord":["123456789012345678"],"whatsapp":["verified-user-id"],"agent":["verified-owner-id"]}
+SOLI_BRIDGE_SECRETS_JSON={"slack":"<random32+>","telegram":"<different32+>","discord":"<different32+>","whatsapp":"<different32+>","whatsapp_cloud":"<different32+>","agent":"<different32+>"}
+SOLI_OWNERS_JSON={"slack":["U..."],"telegram":["123456789"],"discord":["123456789012345678"],"whatsapp":["verified-user-id"],"whatsapp_cloud":["verified-cloud-user-id"],"agent":["verified-owner-id"]}
 ```
 
 Omit unused platforms. Missing owners are denied. Do not grant owner privileges
