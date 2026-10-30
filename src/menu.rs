@@ -20,6 +20,10 @@ pub fn catalogue() -> Value {
             {"label":"Tutup semua posisi Soli","command":"close-all CONFIRM","write":true}]},
         {"label":"Pengaturan","items":[
             {"label":"Lihat pengaturan","command":"settings","write":false},
+            {"label":"Laporan setiap 30 menit","command":"settings set report-minutes 30","write":true},
+            {"label":"Laporan setiap 1 jam","command":"settings set report-minutes 60","write":true},
+            {"label":"Laporan setiap 2 jam","command":"settings set report-minutes 120","write":true},
+            {"label":"Matikan laporan berkala","command":"settings set report-minutes off","write":true},
             {"label":"Batas entry strategi 1 USDC","command":"settings set entry 1USDC","write":true},
             {"label":"Batas entry strategi 5 USDC","command":"settings set entry 5USDC","write":true},
             {"label":"Stop-loss 15%","command":"settings set stop-loss 15","write":true},
@@ -54,6 +58,18 @@ pub fn render(v: &Value) -> String {
     if let Some(e) = v.get("error") {
         return format!("Soli: {}", e.as_str().unwrap_or("permintaan ditolak"));
     }
+    let notification = v.get("notifications").map(|n| {
+        if n["enabled"] == true {
+            format!("Laporan lifecycle: setiap {} menit", n["minutes"])
+        } else {
+            "Laporan lifecycle berkala: nonaktif (notifikasi kejadian tetap aktif)".into()
+        }
+    });
+    if v["strategy"].is_null()
+        && let Some(text) = &notification
+    {
+        return format!("{text}\nTersimpan; langsung berlaku.");
+    }
     if v["strategy"].is_object() {
         let s = &v["strategy"];
         return format!(
@@ -70,7 +86,9 @@ pub fn render(v: &Value) -> String {
                     "Tersimpan; restart engine untuk menerapkan."
                 }
             } else {
-                "Nominal entry juga mengikuti mandat mode dan batas risiko."
+                notification
+                    .as_deref()
+                    .unwrap_or("Nominal entry juga mengikuti mandat mode dan batas risiko.")
             }
         );
     }
@@ -163,12 +181,15 @@ pub fn render(v: &Value) -> String {
     }
     if v.get("paper_cash_usdc_atomic").is_some() {
         return format!(
-            "Laporan Soli · {}\nSaldo virtual: {} USDC\nPnL paper hari ini: {} USDC\nFill hari ini: {}\nDrawdown: {}%",
+            "Laporan Soli · {}\nSaldo virtual: {} USDC\nPnL paper hari ini: {} USDC\nFill hari ini: {}\nDrawdown: {}",
             v["mode"].as_str().unwrap_or("unknown"),
             amount(&v["paper_cash_usdc_atomic"], 6),
             amount(&v["paper_realized_pnl_today_usdc_atomic"], 6),
             v["paper_fills_today"].as_array().map_or(0, Vec::len),
             v["peak_to_current_drawdown_pct"]
+                .as_f64()
+                .map(|n| format!("{n:.2}%"))
+                .unwrap_or_else(|| "belum tersedia".into())
         );
     }
     serde_json::to_string_pretty(v).unwrap_or_default()

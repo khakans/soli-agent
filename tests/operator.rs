@@ -242,6 +242,32 @@ async fn native_install_scopes_revocation_and_restart() {
     let before: Value =
         serde_json::from_slice(&std::fs::read(home.join("engine.pid.json")).unwrap()).unwrap();
     let settings_url = "http://127.0.0.1:8787/v1/settings";
+    let frequency = json!({"field":"report-minutes","value":"30"});
+    assert_eq!(
+        http.post(settings_url)
+            .bearer_auth(credential["token"].as_str().unwrap())
+            .json(&frequency)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        403
+    );
+    let saved: Value = http
+        .post(settings_url)
+        .bearer_auth(operator)
+        .json(&frequency)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(saved["notifications"]["minutes"], 30);
+    assert_eq!(saved["restart_required"], false);
+    let after_frequency: Value =
+        serde_json::from_slice(&std::fs::read(home.join("engine.pid.json")).unwrap()).unwrap();
+    assert_eq!(before, after_frequency);
     let update = json!({"field":"stop-loss","value":"14"});
     assert_eq!(
         http.post(settings_url)
@@ -285,6 +311,16 @@ async fn native_install_scopes_revocation_and_restart() {
         }
     }
     assert!(reloaded, "supervisor failed to reload validated settings");
+    let settings_after: Value = http
+        .get(settings_url)
+        .bearer_auth(operator)
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(settings_after["notifications"]["minutes"], 30);
     let mut after: Value = before.clone();
     for _ in 0..50 {
         after =

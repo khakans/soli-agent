@@ -196,7 +196,7 @@ fn command(e: &Event, live: bool) -> Result<(reqwest::Method, String, Option<Val
   ("status",[])=>get(if live{"/v1/live/status"}else{"/v1/status"}.into()),
   ("report",[])=>get("/v1/report".into()),
   ("settings",[])=>get("/v1/settings".into()),
-  ("settings",[action,field,value]) if !live && action=="set"=>post("/v1/settings",json!({"field":field,"value":value})),
+  ("settings",[action,field,value]) if action=="set" && (!live || field=="report-minutes")=>post("/v1/settings",json!({"field":field,"value":value})),
   ("lifecycle",[]) if !live=>get("/v1/lifecycle".into()),
   ("mode"|"pause"|"resume-cycle"|"force-close"|"close-all",args) if !live=>post("/v1/lifecycle/control",json!({"action":e.command,"args":args})),
   ("wallet"|"positions"|"pnl",[])=>get("/v1/wallet".into()),

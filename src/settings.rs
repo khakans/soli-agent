@@ -4,8 +4,11 @@ use axum::{Json, extract::State};
 use serde::Deserialize;
 use serde_json::json;
 pub async fn read(State(app): State<App>) -> ApiResult {
+    let notification =
+        crate::notify::schedule(&app.store.lock().map_err(|_| bad("store unavailable"))?.db)
+            .map_err(bad)?;
     Ok(Json(
-        json!({"mode":if app.live_enabled{"live"}else{"dry_run"},"strategy":app.strategy,"strategy_hash":app.strategy.fingerprint(),"trigger":app.entry_trigger,"watch_mints":app.watchlist,"smart_wallets":app.smart_wallets,"live_changes":"maintenance and renewed owner mandate required"}),
+        json!({"notifications":notification,"mode":if app.live_enabled{"live"}else{"dry_run"},"strategy":app.strategy,"strategy_hash":app.strategy.fingerprint(),"trigger":app.entry_trigger,"watch_mints":app.watchlist,"smart_wallets":app.smart_wallets,"live_changes":"maintenance and renewed owner mandate required"}),
     ))
 }
 #[derive(Deserialize)]
@@ -52,6 +55,16 @@ fn change(s: &mut Strategy, field: &str, value: &str) -> Result<(), String> {
     s.validate()
 }
 pub async fn update(State(app): State<App>, Json(r): Json<Update>) -> ApiResult {
+    if r.field == "report-minutes" {
+        let settings = crate::notify::set_schedule(
+            &app.store.lock().map_err(|_| bad("store unavailable"))?.db,
+            &r.value,
+        )
+        .map_err(bad)?;
+        return Ok(Json(
+            json!({"saved":true,"notifications":settings,"restart_required":false}),
+        ));
+    }
     if app.live_enabled {
         return Err(bad(
             "live settings require maintenance and a renewed owner mandate",

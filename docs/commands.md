@@ -26,6 +26,20 @@ maintenance operations so existing mandates cannot silently change. Actual paper
 entry remains bounded by both the mode allowance and strategy ceiling, plus fixed
 ledger risk limits. Status, wallet, settings and reports have concise native text.
 
+Owner command `/soli settings set report-minutes 60` enables hourly lifecycle
+reports to the operator-configured notification destinations. Use any whole
+number from 5 to 1440 minutes, or `off` (also `0`) to stop periodic reports.
+Native menu → Pengaturan includes 30, 60, 120 minutes and off. This setting
+applies immediately in both paper and live, without restarting or changing
+trading mandates; `/soli settings` shows the interval and next due timestamp.
+The interval and next deadline survive restart. A frequency change sends one
+current report; recovery after downtime sends one current snapshot, not backlog.
+Important entry/exit and fault notifications remain enabled independently.
+The durable outbox checks every 10 seconds, retries delivery failures and may
+duplicate delivery if a platform acknowledgement is lost. Configure private
+destinations and credentials through `SOLI_NOTIFICATIONS_FILE`; no destination
+means no delivery. Reports use the Rust engine directly and consume no LLM tokens.
+
 Authenticated owner commands in live mode:
 
 ```text

@@ -632,6 +632,7 @@ async fn client_command(token: &str, args: &[String]) -> Result<(), Box<dyn std:
     let request = match args[0].as_str() {
         "status" if args.len() == 1 => http.get(format!("{base}/v1/status")),
         "settings" if args.len() == 1 => http.get(format!("{base}/v1/settings")),
+        "settings" if args.len() == 4 && args[1] == "set" => http.post(format!("{base}/v1/settings")).json(&json!({"field":args[2],"value":args[3]})),
         "lifecycle" if args.len()==1=>http.get(format!("{base}/v1/lifecycle")),
         "learning" if args.len()==1=>http.get(format!("{base}/v1/learning")),
         "wallet"|"positions"|"pnl" if args.len()==1=>http.get(format!("{base}/v1/wallet")),

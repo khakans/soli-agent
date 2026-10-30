@@ -34,7 +34,87 @@ pub fn init(db: &Connection) -> Result<(), String> {
 fn schema(db: &Connection) -> Result<(), String> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS outbox(id TEXT PRIMARY KEY,target TEXT,data TEXT,attempts INTEGER DEFAULT 0,next_at INTEGER,delivered_at INTEGER,last_error TEXT);")
         .map_err(|_|"outbox schema failed")?;
+    db.execute_batch("CREATE TABLE IF NOT EXISTS notification_schedule(id INTEGER PRIMARY KEY CHECK(id=1),minutes INTEGER NOT NULL,next_at INTEGER NOT NULL,started_at INTEGER NOT NULL);")
+        .map_err(|_| "notification schedule schema failed")?;
+    db.execute(
+        "INSERT OR IGNORE INTO notification_schedule VALUES(1,0,0,?1)",
+        [now()],
+    )
+    .map_err(|_| "notification schedule initialization failed")?;
     Ok(())
+}
+pub fn schedule(db: &Connection) -> Result<Value, String> {
+    db.query_row(
+        "SELECT minutes,next_at FROM notification_schedule WHERE id=1",
+        [],
+        |r| {
+            let minutes: u64 = r.get(0)?;
+            Ok(json!({"minutes":minutes,"enabled":minutes>0,"next_at":r.get::<_,u64>(1)?}))
+        },
+    )
+    .map_err(|_| "notification schedule unavailable".into())
+}
+pub fn set_schedule(db: &Connection, value: &str) -> Result<Value, String> {
+    let minutes = if value == "off" {
+        0
+    } else {
+        value
+            .parse::<u64>()
+            .map_err(|_| "report-minutes: off or 5..1440")?
+    };
+    if minutes != 0 && !(5..=1440).contains(&minutes) {
+        return Err("report-minutes: off or 5..1440".into());
+    }
+    // Applying a new frequency sends one current snapshot, then schedules from that point.
+    let tx = db
+        .unchecked_transaction()
+        .map_err(|_| "notification schedule transaction failed")?;
+    tx.execute("UPDATE outbox SET attempts=12,last_error='superseded by report frequency change' WHERE delivered_at IS NULL AND json_extract(data,'$.kind')='lifecycle_report'",[])
+        .map_err(|_| "notification schedule cancellation failed")?;
+    tx.execute(
+        "UPDATE notification_schedule SET minutes=?1,next_at=?2 WHERE id=1",
+        params![minutes, now()],
+    )
+    .map_err(|_| "notification schedule save failed")?;
+    tx.commit()
+        .map_err(|_| "notification schedule commit failed")?;
+    schedule(db)
+}
+fn periodic(
+    db: &Connection,
+    stamp: u64,
+    data: &Value,
+    configured: &[Target],
+) -> Result<(), String> {
+    let tx = db
+        .unchecked_transaction()
+        .map_err(|_| "notification schedule transaction failed")?;
+    let (minutes, next): (u64, u64) = tx
+        .query_row(
+            "SELECT minutes,next_at FROM notification_schedule WHERE id=1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|_| "notification schedule unavailable")?;
+    if minutes > 0 && stamp >= next && !configured.is_empty() {
+        for target in configured {
+            enqueue_target(
+                &tx,
+                target,
+                &format!("lifecycle:{}", uuid::Uuid::new_v4()),
+                "lifecycle_report",
+                data,
+            )?;
+        }
+        // Coalesce downtime into one current report; never replay hourly backlog.
+        tx.execute(
+            "UPDATE notification_schedule SET next_at=?1 WHERE id=1",
+            [stamp + minutes * 60],
+        )
+        .map_err(|_| "notification schedule advance failed")?;
+    }
+    tx.commit()
+        .map_err(|_| "notification schedule commit failed".into())
 }
 fn validate_targets() -> Result<(), String> {
     for t in targets()? {
@@ -141,11 +221,34 @@ async fn deliver(
     payload: &Value,
     secret: &str,
 ) -> Result<(), String> {
-    let text = format!(
-        "Soli · {}\n{}",
-        payload["kind"].as_str().unwrap_or("event"),
-        serde_json::to_string(&payload["data"]).unwrap_or_default()
-    );
+    let text = if payload["kind"] == "lifecycle_report" {
+        let data = &payload["data"];
+        let fresh = data["latest_sample_at"]
+            .as_u64()
+            .is_some_and(|t| now().saturating_sub(t) <= 300);
+        format!(
+            "Laporan lifecycle Soli · {} WIB\n{}\n{}\nData pasar: {}\nSaldo dan PnL paper bukan dana asli; hari laporan mengikuti UTC.",
+            chrono::DateTime::from_timestamp(payload["timestamp"].as_i64().unwrap_or(0), 0)
+                .map(|t| t
+                    .with_timezone(&chrono::FixedOffset::east_opt(25200).unwrap())
+                    .format("%d-%m %H:%M")
+                    .to_string())
+                .unwrap_or_else(|| "waktu tidak tersedia".into()),
+            crate::menu::render(&data["status"]),
+            crate::menu::render(&data["report"]),
+            if fresh {
+                "sampel terbaru tersedia"
+            } else {
+                "belum tersedia atau lebih dari 5 menit; valuasi bisa kedaluwarsa"
+            }
+        )
+    } else {
+        format!(
+            "Soli · {}\n{}",
+            payload["kind"].as_str().unwrap_or("event"),
+            serde_json::to_string(&payload["data"]).unwrap_or_default()
+        )
+    };
     let request=match t.kind.as_str() {
         "slack"=>http.post("https://slack.com/api/chat.postMessage").bearer_auth(secret).json(&json!({"channel":t.destination,"text":text,"unfurl_links":false,"unfurl_media":false})),
         "telegram"=>http.post(format!("https://api.telegram.org/bot{secret}/sendMessage")).json(&json!({"chat_id":t.destination,"text":text.chars().take(3900).collect::<String>()})),
@@ -236,8 +339,43 @@ pub fn start(app: App) {
             }
             if let Ok(axum::Json(report)) =
                 crate::research::report(axum::extract::State(app.clone())).await
+                && let Ok(axum::Json(status)) =
+                    crate::status(axum::extract::State(app.clone())).await
                 && let Ok(s) = app.store.lock()
             {
+                let latest_sample: Option<u64> =
+                    s.db.query_row("SELECT MAX(ts) FROM samples", [], |r| r.get(0))
+                        .ok()
+                        .flatten();
+                if let Err(e) = targets().and_then(|t| {
+                    periodic(
+                        &s.db,
+                        now(),
+                        &json!({"status":status,"report":report,"latest_sample_at":latest_sample}),
+                        &t,
+                    )
+                }) {
+                    eprintln!("Lifecycle notification: {e}");
+                }
+                let since =
+                    s.db.query_row(
+                        "SELECT started_at FROM notification_schedule WHERE id=1",
+                        [],
+                        |r| r.get::<_, u64>(0),
+                    )
+                    .unwrap_or(u64::MAX);
+                for fill in s.ledger.fills.iter().filter(|f| f.timestamp >= since) {
+                    let _ = enqueue(
+                        &s.db,
+                        &format!("paper-fill:{}", fill.id),
+                        if fill.side == "buy" {
+                            "paper_entry_filled"
+                        } else {
+                            "paper_exit_filled"
+                        },
+                        &json!(fill),
+                    );
+                }
                 // Send the completed prior UTC day's persisted snapshot once, including after downtime.
                 let day = now() / 86400;
                 let previous: Option<String> =
@@ -282,6 +420,60 @@ pub fn start(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn schedule_survives_restart_coalesces_downtime_and_can_be_disabled() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let db = Connection::open(file.path()).unwrap();
+        schema(&db).unwrap();
+        assert!(set_schedule(&db, "1").is_err());
+        assert!(set_schedule(&db, "1441").is_err());
+        assert!(set_schedule(&db, "-5").is_err());
+        let t = Target {
+            id: "dm".into(),
+            kind: "slack".into(),
+            destination: "D1".into(),
+            secret_env: "TEST_ONLY".into(),
+        };
+        let schedule = set_schedule(&db, "60").unwrap();
+        let stamp = schedule["next_at"].as_u64().unwrap();
+        periodic(&db, stamp, &json!({}), &[]).unwrap();
+        assert_eq!(super::schedule(&db).unwrap()["next_at"], stamp);
+        periodic(&db, stamp, &json!({}), std::slice::from_ref(&t)).unwrap();
+        drop(db);
+        let db = Connection::open(file.path()).unwrap();
+        schema(&db).unwrap();
+        periodic(&db, stamp + 3599, &json!({}), std::slice::from_ref(&t)).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            1
+        );
+        periodic(&db, stamp + 86400, &json!({}), std::slice::from_ref(&t)).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            super::schedule(&db).unwrap()["next_at"],
+            stamp + 86400 + 3600
+        );
+        set_schedule(&db, "off").unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM outbox WHERE attempts<12", [], |r| r
+                .get::<_, u64>(
+                0
+            ))
+            .unwrap(),
+            0
+        );
+        periodic(&db, stamp + 172800, &json!({}), &[t]).unwrap();
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, u64>(0))
+                .unwrap(),
+            2
+        );
+    }
     #[test]
     fn outbox_keeps_retry_and_receipt_state_on_disk() {
         let file = tempfile::NamedTempFile::new().unwrap();
