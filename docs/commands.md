@@ -46,7 +46,9 @@ read/preview/paper MCP credentials, never owner credentials or connector secrets
 
 Slack requires `/soli` and `/soli-menu` registration in its app manifest and the
 `commands` scope. On Hermes Slack, `!soli-menu` / `!soli ...` work through known
-command rewriting, including threads. Other platforms route native slash or
+command rewriting, including threads. Shared-channel mention rules still apply:
+with strict mention enabled, use `@Soli !soli-menu` or `@Soli !soli ...` there;
+DMs need no mention. Other platforms route native slash or
 message-prefix commands through their adapter. WhatsApp requires a connected
 verified WhatsApp adapter; Soli does not provision a phone number or Meta app.
 Telegram uses `/soli_menu` (underscore) for its native command-name rules;

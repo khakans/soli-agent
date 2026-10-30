@@ -47,6 +47,8 @@ Test the actual installed version/platform; mock source tests are not that test.
 Hermes Slack also rewrites `!soli-menu` and `!soli ...` through its known-command
 handler, without needing a Slack slash registration. Other transports still need
 their real account/adapter configured; protocol support does not connect accounts.
+Strict mention policy still applies to message-prefix commands in shared channels:
+use `@Soli !soli-menu` there, or `!soli-menu` directly in a DM.
 
 The engine persists daily summaries. To deliver them daily, use Hermes cron with
 the `soli_read` report tool and your chosen platform/chat target. Transport tokens
