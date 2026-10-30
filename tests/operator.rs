@@ -80,6 +80,14 @@ async fn native_install_scopes_revocation_and_restart() {
         );
     };
     let cleanup = Cleanup(home.clone());
+    std::fs::create_dir_all(&home).unwrap();
+    let env_file = home.join(".env");
+    std::fs::write(&env_file, include_str!("../.env.example")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&env_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    }
     command(&["install", "test"]);
     command(&["down"]);
     assert!(!home.join("engine.pid.json").exists());
@@ -90,8 +98,12 @@ async fn native_install_scopes_revocation_and_restart() {
     let credential: Value =
         serde_json::from_slice(&std::fs::read(home.join("credentials/test.json")).unwrap())
             .unwrap();
-    let profile: Value =
-        serde_json::from_slice(&std::fs::read(home.join("engine.json")).unwrap()).unwrap();
+    let active: std::collections::BTreeMap<String, String> = dotenvy::from_path_iter(&env_file)
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert!(!active["SOLI_API_TOKEN"].starts_with("replace-"));
+    let profile = serde_json::to_value(active).unwrap();
     // Match the native MCP adapter's per-call HTTP connection, including after a forced restart.
     let http = reqwest::Client::builder()
         .pool_max_idle_per_host(0)
