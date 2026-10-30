@@ -120,7 +120,7 @@ impl Security {
     }
 }
 fn supported(p: &str) -> bool {
-    ["slack", "telegram", "discord"].contains(&p)
+    ["slack", "telegram", "discord", "whatsapp", "agent"].contains(&p)
 }
 type Reply = Result<Json<Value>, (StatusCode, Json<Value>)>;
 fn error(s: impl ToString) -> (StatusCode, Json<Value>) {
@@ -151,6 +151,11 @@ async fn event(State(b): State<Bridge>, headers: HeaderMap, body: Bytes) -> Repl
             "resume",
             "cancel",
             "reconcile",
+            "force-close",
+            "close-all",
+            "pause",
+            "resume-cycle",
+            "mode",
         ]
         .contains(&e.command.as_str())
     {
@@ -182,6 +187,15 @@ fn command(e: &Event, live: bool) -> Result<(reqwest::Method, String, Option<Val
     match (e.command.as_str(),e.arguments.as_slice()) {
   ("status",[])=>get(if live{"/v1/live/status"}else{"/v1/status"}.into()),
   ("report",[])=>get("/v1/report".into()),
+  ("mode"|"pause"|"resume-cycle"|"force-close"|"close-all",args) if !live=>post("/v1/lifecycle/control",json!({"action":e.command,"args":args})),
+  ("wallet"|"positions"|"pnl",[])=>get("/v1/wallet".into()),
+  ("position",[mint]) if soli_agent::valid_mint(mint)=>get(format!("/v1/wallet/positions/{mint}")),
+  ("learning",[])=>get("/v1/learning".into()),
+  ("candidates",[])=>get("/v1/live/candidates".into()),
+  ("force-close",[mint,c]) if live && c=="CONFIRM" && (soli_agent::valid_mint(mint)||mint=="all")=>post("/v1/owner-event",json!({})),
+  ("close-all",[c]) if live && c=="CONFIRM"=>post("/v1/owner-event",json!({})),
+  ("pause"|"resume-cycle",[scope]) if live && ["entries","all"].contains(&scope.as_str())=>post("/v1/owner-event",json!({})),
+  ("mode",[mode,_,_]) if live && ["manual","semi","full"].contains(&mode.as_str())=>post("/v1/owner-event",json!({})),
   ("risk",[mint]) if soli_agent::valid_mint(mint)=>get(format!("/v1/risk/{mint}")),
   ("market",[mint]) if soli_agent::valid_mint(mint)=>get(format!("/v1/market/{mint}")),
   ("preview",[side,mint,amount]) if ["buy","sell"].contains(&side.as_str())&&soli_agent::valid_mint(mint)=>post(if live{"/v1/live/previews"}else{"/v1/paper/previews"},json!({"side":side,"mint":mint,"amount":amount.parse::<u64>().map_err(|_|"amount must be atomic integer")?})),
@@ -228,7 +242,7 @@ mod tests {
     use super::*;
     #[test]
     fn transport_rules_and_command_scopes() {
-        for p in ["slack", "telegram", "discord"] {
+        for p in ["slack", "telegram", "discord", "whatsapp", "agent"] {
             assert!(supported(p));
         }
         assert!(!supported("cli"));
@@ -246,41 +260,43 @@ mod tests {
     }
     #[test]
     fn signed_identity_timestamp_and_replay_are_enforced() {
-        let db = Connection::open_in_memory().unwrap();
-        db.execute_batch("CREATE TABLE bridge_events(platform TEXT,id TEXT,ts INTEGER,PRIMARY KEY(platform,id));").unwrap();
-        let s = Security {
-            secrets: BTreeMap::from([("telegram".into(), "secret".into())]),
-            owners: BTreeMap::from([("telegram".into(), vec!["42".into()])]),
-            db: Mutex::new(db),
-        };
-        let e = Event {
-            event_id: "e".into(),
-            platform: "telegram".into(),
-            user_id: "42".into(),
-            conversation_id: "123".into(),
-            thread_id: Some("9".into()),
-            command: "status".into(),
-            arguments: vec![],
-        };
-        let body = serde_json::to_vec(&e).unwrap();
-        let ts = super::super::now().to_string();
-        let mut h = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
-        h.update(ts.as_bytes());
-        h.update(b".");
-        h.update(&body);
-        let mut headers = HeaderMap::new();
-        headers.insert("x-soli-time", ts.parse().unwrap());
-        headers.insert(
-            "x-soli-signature",
-            hex::encode(h.finalize().into_bytes()).parse().unwrap(),
-        );
-        let mut tampered = body.clone();
-        tampered.push(b' ');
-        assert!(s.verify(&headers, &tampered).is_err());
-        assert_eq!(
-            s.verify(&headers, &body).unwrap().thread_id.as_deref(),
-            Some("9")
-        );
-        assert!(s.verify(&headers, &body).is_err());
+        for platform in ["slack", "telegram", "discord", "whatsapp", "agent"] {
+            let db = Connection::open_in_memory().unwrap();
+            db.execute_batch("CREATE TABLE bridge_events(platform TEXT,id TEXT,ts INTEGER,PRIMARY KEY(platform,id));").unwrap();
+            let s = Security {
+                secrets: BTreeMap::from([(platform.into(), "secret".into())]),
+                owners: BTreeMap::from([(platform.into(), vec!["42".into()])]),
+                db: Mutex::new(db),
+            };
+            let e = Event {
+                event_id: "e".into(),
+                platform: platform.into(),
+                user_id: "42".into(),
+                conversation_id: "123".into(),
+                thread_id: Some("9".into()),
+                command: "status".into(),
+                arguments: vec![],
+            };
+            let body = serde_json::to_vec(&e).unwrap();
+            let ts = super::super::now().to_string();
+            let mut h = Hmac::<Sha256>::new_from_slice(b"secret").unwrap();
+            h.update(ts.as_bytes());
+            h.update(b".");
+            h.update(&body);
+            let mut headers = HeaderMap::new();
+            headers.insert("x-soli-time", ts.parse().unwrap());
+            headers.insert(
+                "x-soli-signature",
+                hex::encode(h.finalize().into_bytes()).parse().unwrap(),
+            );
+            let mut tampered = body.clone();
+            tampered.push(b' ');
+            assert!(s.verify(&headers, &tampered).is_err());
+            assert_eq!(
+                s.verify(&headers, &body).unwrap().thread_id.as_deref(),
+                Some("9")
+            );
+            assert!(s.verify(&headers, &body).is_err());
+        }
     }
 }

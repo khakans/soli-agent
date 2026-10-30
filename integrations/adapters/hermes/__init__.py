@@ -17,7 +17,16 @@ def _command(raw_args, *, source=None, platform="", **kwargs):
         return "Soli requires an authenticated native transport session."
     platform = platform or getattr(source, "platform", "")
     thread = getattr(source, "thread_id", None)
-    words = shlex.split(raw_args)
+    try:
+        words = shlex.split(raw_args)
+    except ValueError:
+        return "Invalid command quoting; use /soli menu."
+    if words and words[0] == "menu":
+        return _run(["menu"])
+    if not words or words[0] in ("status", "report", "wallet", "positions", "pnl", "position", "learning", "candidates"):
+        if words and words[0] == "candidates":
+            words[0] = "live-candidates"
+        return _run(words or ["status"])
     return _run(["connector"], {"event_id":"native", "platform":getattr(platform,"value",platform),
         "user_id":str(getattr(source,"user_id","") or ""), "conversation_id":str(getattr(source,"chat_id","") or ""),
         "thread_id":str(thread) if thread is not None else None,
@@ -30,7 +39,9 @@ def _read(args, **kwargs):
 
 
 def register(ctx):
-    ctx.register_command("soli", handler=_command, description="Soli native Rust connector")
+    ctx.register_command("soli-menu", handler=lambda *args, **kwargs: _run(["menu"]), description="List Soli commands")
+    ctx.register_command("soli_menu", handler=lambda *args, **kwargs: _run(["menu"]), description="List Soli commands (Telegram)")
+    ctx.register_command("soli", handler=_command, description="Soli native Rust connector", args_hint="<command and arguments>")
     ctx.register_tool(name="soli_read", toolset="soli", handler=_read,
         schema={"name":"soli_read","description":"Read Soli status/report; cannot authorize trades.",
             "parameters":{"type":"object","properties":{"action":{"type":"string","enum":["status","report"]}},"additionalProperties":False}})
