@@ -12,6 +12,7 @@ type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub fn handles(cmd: &str) -> bool {
     [
         "install",
+        "setup",
         "configure",
         "agent-add",
         "agent-revoke",
@@ -586,6 +587,39 @@ pub async fn command(args: &[String]) -> Result<()> {
             .ok_or("missing command argument")
     };
     match args[0].as_str() {
+        "setup" => {
+            let agent = args.get(1).map(String::as_str).unwrap_or("default");
+            if !home.join("engine.json").exists() && !home.join(".env").exists() {
+                Box::pin(command(&["install".into(), agent.into()])).await?;
+            }
+            println!("Soli setup: hidden local input; Enter preserves existing settings.");
+            let mut settings = profile(&home, "engine")?;
+            for name in [
+                "SOLI_RPC_URL",
+                "SOLI_WS_URL",
+                "JUPITER_API_KEY",
+                "GOPLUS_APP_KEY",
+                "GOPLUS_APP_SECRET",
+                "SOLI_WALLET_ADDRESS",
+                "SOLI_WATCH_MINTS",
+                "SOLI_SMART_WALLETS",
+            ] {
+                let value = zeroize::Zeroizing::new(rpassword::prompt_password(format!(
+                    "{name} (Enter keeps current): "
+                ))?);
+                if !value.is_empty() {
+                    settings.insert(name.into(), value.to_string());
+                }
+            }
+            save_profile(&home, "engine", &settings)?;
+            stop(&home, "engine")?;
+            start(&home, "engine").await?;
+            println!(
+                "Engine running. MCP configuration: {}",
+                home.join(format!("mcp-{agent}.json")).display()
+            );
+            Box::pin(command(&["doctor".into(), "--providers".into()])).await?;
+        }
         "wallet-check" => run(&mut spawned_command(
             &home,
             "signer",

@@ -53,6 +53,15 @@ Verify discovery and status before claiming that a particular host works.
 
 ## Configure locally
 
+`soli-agent setup my-agent` combines installation, hidden provider/address prompts,
+engine restart and provider acceptance. Enter preserves existing settings. It
+does not activate live trading or import a signing key into the engine.
+
+Native trusted connector shortcuts: `mode full` selects a 24-hour, 1-USDC mandate;
+`pause` and `resume-cycle` default to all automation. A buy preview accepts exact
+decimal units such as `preview buy MINT 1.25USDC`; bare integers retain atomic-unit
+semantics. `close MINT CONFIRM` aliases force-close; confirmation remains required.
+
 Each command prompts for hidden input; no credentials belong in chat or arguments.
 
 ```text
