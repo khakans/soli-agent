@@ -2,7 +2,9 @@
 
 Agent-independent Rust engine for **Solana spot memecoins**. Default: dry run.
 Connect an AI agent through native Rust MCP, HTTP tools or CLI; Hermes is an optional native
-adapter for **Slack, Telegram and Discord**. Local `.env` or Vault-backed signing runs as a
+adapter. The shared command protocol supports **Slack, Telegram, Discord, WhatsApp
+and other trusted agent hosts**; actual accounts require their transport setup.
+Local `.env` or Vault-backed signing runs as a
 separate process. No wallets or credentials are included.
 
 **Installing from an agent? Read [INSTALL.md](INSTALL.md), then [SKILL.md](SKILL.md).**
@@ -38,9 +40,10 @@ before considering real funds.
   strategies, and opt-in paper-only automatic strategy refinement/restart.
 - Screened strategy signals enter a persistent, expiring live candidate inbox
   (`soli_status` view `live-candidates`). Deduplicated notifications use the outbox.
-  Candidates never submit orders; request a fresh preview and exact owner approval.
+  Queue insertion never submits an order. Manual/semi entries need exact approval;
+  the isolated full-mode worker needs a current owner mandate and fresh policy checks.
 - Native Hermes plugin, read-only model tool, signed transport context, stable-ID
-  owner authorization and replay protection across Slack, Telegram and Discord.
+  owner authorization and replay protection across all supported transports.
 - Agent-neutral MCP tools for status/reports, token research, paper/live previews
   and virtual paper fills. MCP does not expose real-order execution or key access.
 - Operator-only key generation/import and Vault Ed25519 compatibility probe.
