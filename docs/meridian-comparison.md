@@ -41,5 +41,6 @@ Multiple wallets may share a beneficial owner. Holder concentration aggregates
 observed largest token accounts by owner; it cannot prove absence of Sybil control.
 
 The optional `momentum` trigger uses persisted five-minute market samples and the
-versioned thresholds. The default `wallet_convergence` trigger does not silently
-fall back to momentum if wallet monitoring fails.
+versioned thresholds. The default `wallet_convergence` trigger falls back to
+momentum only when no smart-wallet addresses are configured. It does not fall
+back if configured wallet monitoring fails.

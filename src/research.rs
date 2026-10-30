@@ -484,9 +484,18 @@ pub fn start(app: App) {
         }
     }
 }
+pub fn effective_entry_trigger(configured: &str, has_smart_wallets: bool) -> &str {
+    if configured == "wallet_convergence" && !has_smart_wallets {
+        "momentum"
+    } else {
+        configured
+    }
+}
+
 async fn tick(app: &App, data: &Data) -> Result<(), String> {
     let _ = crate::learning::review(app, true).await;
-    if app.entry_trigger == "wallet_convergence" && !app.smart_wallets.is_empty() {
+    let entry_trigger = effective_entry_trigger(&app.entry_trigger, !app.smart_wallets.is_empty());
+    if entry_trigger == "wallet_convergence" {
         crate::signals::tick(app, data).await?;
     }
     for mint in &app.watchlist {
@@ -509,13 +518,13 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
                 "entry_signal",
                 json!({"mint":mint,"accepted":risk.accepted,"risk":risk,"strategy_hash":app.strategy.fingerprint()}),
             );
-            if risk.accepted && app.entry_trigger == "momentum" {
+            if risk.accepted && entry_trigger == "momentum" {
                 live_candidate(app, mint, "momentum")?;
             }
             if risk.accepted
                 && crate::paper_cycle::entry(app)
                 && !app.live_enabled
-                && app.entry_trigger == "momentum"
+                && entry_trigger == "momentum"
             {
                 let q = super::preview(
                     State(app.clone()),
@@ -675,6 +684,19 @@ async fn websocket(app: App, url: String, mints: Vec<String>) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wallet_convergence_falls_back_to_momentum_without_wallets() {
+        assert_eq!(
+            effective_entry_trigger("wallet_convergence", false),
+            "momentum"
+        );
+        assert_eq!(
+            effective_entry_trigger("wallet_convergence", true),
+            "wallet_convergence"
+        );
+        assert_eq!(effective_entry_trigger("momentum", false), "momentum");
+    }
+
     #[test]
     fn live_candidate_queue_is_durable_deduplicated_and_expires() {
         let dir = tempfile::tempdir().unwrap();
