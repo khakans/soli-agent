@@ -187,6 +187,7 @@ fn command(e: &Event, live: bool) -> Result<(reqwest::Method, String, Option<Val
     match (e.command.as_str(),e.arguments.as_slice()) {
   ("status",[])=>get(if live{"/v1/live/status"}else{"/v1/status"}.into()),
   ("report",[])=>get("/v1/report".into()),
+  ("lifecycle",[]) if !live=>get("/v1/lifecycle".into()),
   ("mode"|"pause"|"resume-cycle"|"force-close"|"close-all",args) if !live=>post("/v1/lifecycle/control",json!({"action":e.command,"args":args})),
   ("wallet"|"positions"|"pnl",[])=>get("/v1/wallet".into()),
   ("position",[mint]) if soli_agent::valid_mint(mint)=>get(format!("/v1/wallet/positions/{mint}")),

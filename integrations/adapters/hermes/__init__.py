@@ -23,7 +23,7 @@ def _command(raw_args, *, source=None, platform="", **kwargs):
         return "Invalid command quoting; use /soli menu."
     if words and words[0] == "menu":
         return _run(["menu"])
-    if not words or words[0] in ("status", "report", "wallet", "positions", "pnl", "position", "learning", "candidates"):
+    if not words or words[0] in ("status", "lifecycle", "report", "wallet", "positions", "pnl", "position", "learning", "candidates"):
         if words and words[0] == "candidates":
             words[0] = "live-candidates"
         return _run(words or ["status"])

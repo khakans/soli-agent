@@ -126,6 +126,12 @@ async fn authorize(State(app): State<App>, request: Request, next: Next) -> Resp
 }
 
 async fn status(State(app): State<App>) -> ApiResult {
+    let lifecycle = if app.live_enabled {
+        Value::Null
+    } else {
+        serde_json::to_value(paper_cycle::settings(&app).map_err(bad)?)
+            .map_err(|_| bad("lifecycle encoding failed"))?
+    };
     let store = app
         .store
         .lock()
@@ -134,7 +140,7 @@ async fn status(State(app): State<App>) -> ApiResult {
         json!({"agent":"Soli","chain":"solana-mainnet","mode":if app.live_enabled {"live"}else{"dry_run"}, "live_enabled":app.live_enabled,
         "vault":if app.live_enabled {"Transit connected; owner-only live API"}else{"not connected in dry run"}, "jupiter_configured":app.jupiter_key.is_some(),
         "risk":{"max_positions":2,"position_cap_pct":5,"total_cost_cap_pct":10,"daily_realized_loss_pct":3},
-        "ledger":store.ledger,"valuation":"cash and cost basis only; not marked-to-market equity"}),
+        "ledger":store.ledger,"paper_lifecycle":lifecycle,"valuation":"cash and cost basis only; not marked-to-market equity"}),
     ))
 }
 
