@@ -535,6 +535,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .route("/v1/market/{mint}", get(market))
         .route("/v1/paper/previews", post(preview))
         .route("/v1/paper/orders", post(order))
+        .route("/v1/paper/strategy", post(settings::paper_strategy))
         .route("/v1/halt", post(halt))
         .route("/v1/risk/{mint}", get(research::risk))
         .route("/v1/samples/{mint}", get(research::history))

@@ -27,6 +27,7 @@ For an existing connection, discover the Soli tools available in the host:
 - `soli_token`: risk, market, samples or signal replay for a mint.
 - `soli_preview`: paper/live preview; never submits a transaction.
 - `soli_paper_fill`: virtual fill of an existing paper preview.
+- `soli_strategy_update`: adjust bounded paper entry filters with evidence; rejected in live mode.
 
 Buy amounts use USDC atomic units (10 USDC = `10000000`). Sell amounts use the
 token's raw units, with full-position exits only. Present the mode, mint, amount,

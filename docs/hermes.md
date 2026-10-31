@@ -6,6 +6,9 @@ This is native `plugin.yaml` + `register(ctx)` glue; core trading is Rust.
 
 The same Rust catalogue and connector support Slack, Telegram, Discord,
 WhatsApp and other trusted agent hosts. See [universal commands](commands.md).
+`soli_strategy_update` is a paper-scoped MCP tool for atomic, evidence-backed
+entry-filter changes; it cannot edit live strategy, size, freshness limits, exits,
+or risk caps and is rejected when the engine is live.
 Set `SOLI_BINARY`, the agent scoped `SOLI_CREDENTIAL_FILE`, and matching connector secrets in the host and engine. Configure the isolated signer only when the host's permissions are suitable for live owner commands:
 
 ```text

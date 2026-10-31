@@ -40,6 +40,7 @@ impl Role {
                         "/v1/paper/previews",
                         "/v1/live/previews",
                         "/v1/paper/orders",
+                        "/v1/paper/strategy",
                     ]
                     .contains(&path)
             }
@@ -135,6 +136,18 @@ mod tests {
         assert!(
             auth.identify("Bearer secret", "POST", "/v1/paper/orders")
                 .is_ok()
+        );
+        assert!(
+            auth.identify("Bearer secret", "POST", "/v1/paper/strategy")
+                .is_ok()
+        );
+        assert!(
+            auth.identify("Bearer secret", "POST", "/v1/settings")
+                .is_err()
+        );
+        assert!(
+            auth.identify("Bearer secret", "POST", "/v1/live/strategy")
+                .is_err()
         );
         c.revoked = true;
         write(&c);
