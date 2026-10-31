@@ -12,11 +12,14 @@ pub struct Settings {
 }
 pub fn settings(app: &App) -> Result<Settings, String> {
     let s = app.store.lock().map_err(|_| "store unavailable")?;
-    s.db.execute_batch("CREATE TABLE IF NOT EXISTS paper_cycle(id INTEGER PRIMARY KEY,data TEXT);")
+    settings_from_db(&s.db, app)
+}
+pub(crate) fn settings_from_db(db: &rusqlite::Connection, app: &App) -> Result<Settings, String> {
+    db.execute_batch("CREATE TABLE IF NOT EXISTS paper_cycle(id INTEGER PRIMARY KEY,data TEXT);")
         .map_err(|_| "paper control unavailable")?;
     use rusqlite::OptionalExtension;
-    let value =
-        s.db.query_row("SELECT data FROM paper_cycle WHERE id=1", [], |r| {
+    let value = db
+        .query_row("SELECT data FROM paper_cycle WHERE id=1", [], |r| {
             r.get::<_, String>(0)
         })
         .optional()
@@ -112,6 +115,36 @@ pub async fn control(State(app): State<App>, Json(r): Json<Control>) -> ApiResul
         }
         return Ok(Json(json!({"virtual":true,"outcomes":outcomes})));
     }
+    if r.action == "force-entry" {
+        let [mint] = r.args.as_slice() else {
+            return Err(bad("force-entry requires one valid mint"));
+        };
+        if !soli_agent::valid_mint(mint) || mint == soli_agent::USDC {
+            return Err(bad("force-entry requires one valid non-USDC mint"));
+        }
+        let state = settings(&app).map_err(bad)?;
+        if state.paused {
+            return Err(bad("paper lifecycle paused"));
+        }
+        let quote = crate::preview(
+            State(app.clone()),
+            Json(crate::QuoteRequest {
+                side: "buy".into(),
+                mint: mint.clone(),
+                amount: state.entry_usdc.min(app.strategy.entry_usdc),
+            }),
+        )
+        .await?;
+        let preview = quote.0["preview"].clone();
+        let quote_id = preview["id"]
+            .as_str()
+            .ok_or_else(|| bad("preview missing"))?
+            .to_owned();
+        let fill = crate::force_entry_order(app, quote_id).await?;
+        return Ok(Json(
+            json!({"virtual":true,"mode":"dry_run","entry_type":"force","signal_analysis_skipped":true,"token_safety_audit_performed":false,"preview":preview,"fill":fill.0["fill"]}),
+        ));
+    }
     let mut state = settings(&app).map_err(bad)?;
     match (r.action.as_str(), r.args.as_slice()) {
         ("mode", [mode, hours, amount]) if ["manual", "semi", "full"].contains(&mode.as_str()) => {
@@ -140,4 +173,124 @@ pub async fn control(State(app): State<App>, Json(r): Json<Control>) -> ApiResul
     )
     .map_err(|_| bad("paper control save failed"))?;
     Ok(Json(json!({"virtual":true,"lifecycle":state})))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Store, research::Strategy};
+    use rusqlite::Connection;
+    use std::sync::{Arc, Mutex};
+
+    fn app(paused: bool, live_enabled: bool) -> App {
+        let db = Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE paper_cycle(id INTEGER PRIMARY KEY,data TEXT);")
+            .unwrap();
+        let settings = Settings {
+            mode: "manual".into(),
+            paused,
+            expires_at: u64::MAX,
+            entry_usdc: 1_000_000,
+        };
+        db.execute(
+            "INSERT INTO paper_cycle VALUES(1,?1)",
+            [serde_json::to_string(&settings).unwrap()],
+        )
+        .unwrap();
+        App {
+            smart_wallets: vec![],
+            entry_trigger: "momentum".into(),
+            data: None,
+            strategy: Strategy::default(),
+            watchlist: vec![],
+            auto_paper: false,
+            live_enabled,
+            store: Arc::new(Mutex::new(Store {
+                db,
+                ledger: soli_agent::Ledger::new(100_000_000).unwrap(),
+                previews: Default::default(),
+            })),
+            http: reqwest::Client::new(),
+            token: String::new(),
+            jupiter_key: None,
+            fee: 0,
+        }
+    }
+
+    fn error_text(result: ApiResult) -> String {
+        result.unwrap_err().1.0["error"].as_str().unwrap().into()
+    }
+
+    #[tokio::test]
+    async fn force_entry_respects_pause_and_dry_run_boundary() {
+        let mint = "So11111111111111111111111111111111111111112".to_string();
+        let paused = control(
+            State(app(true, false)),
+            Json(Control {
+                action: "force-entry".into(),
+                args: vec![mint.clone()],
+            }),
+        )
+        .await;
+        assert_eq!(error_text(paused), "paper lifecycle paused");
+
+        let live = control(
+            State(app(false, true)),
+            Json(Control {
+                action: "force-entry".into(),
+                args: vec![mint],
+            }),
+        )
+        .await;
+        assert_eq!(error_text(live), "paper controls require dry run");
+    }
+
+    #[tokio::test]
+    async fn force_fill_rechecks_pause_after_quote_creation() {
+        let app = app(false, false);
+        let quote = soli_agent::Preview {
+            id: "fresh-quote".into(),
+            side: "buy".into(),
+            mint: "So11111111111111111111111111111111111111112".into(),
+            input_amount: 1_000_000,
+            quoted_output: 1_000,
+            minimum_output: 900,
+            estimated_fee_usdc: 0,
+            created_at: crate::now(),
+            price_impact_pct: 0.1,
+        };
+        {
+            let mut store = app.store.lock().unwrap();
+            store.previews.insert(quote.id.clone(), quote);
+            let paused = Settings {
+                mode: "manual".into(),
+                paused: true,
+                expires_at: u64::MAX,
+                entry_usdc: 1_000_000,
+            };
+            store
+                .db
+                .execute(
+                    "UPDATE paper_cycle SET data=?1 WHERE id=1",
+                    [serde_json::to_string(&paused).unwrap()],
+                )
+                .unwrap();
+        }
+        let result = crate::force_entry_order(app.clone(), "fresh-quote".into()).await;
+        assert_eq!(error_text(result), "paper lifecycle paused");
+        assert!(app.store.lock().unwrap().ledger.fills.is_empty());
+    }
+
+    #[tokio::test]
+    async fn force_entry_requests_a_fresh_quote_without_strategy_signal() {
+        let result = control(
+            State(app(false, false)),
+            Json(Control {
+                action: "force-entry".into(),
+                args: vec!["So11111111111111111111111111111111111111112".into()],
+            }),
+        )
+        .await;
+        assert_eq!(error_text(result), "JUPITER_API_KEY is not configured");
+    }
 }

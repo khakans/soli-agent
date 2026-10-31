@@ -282,6 +282,12 @@ struct OrderRequest {
     quote_id: String,
 }
 async fn order(State(app): State<App>, Json(input): Json<OrderRequest>) -> ApiResult {
+    order_inner(app, input, false).await
+}
+pub(crate) async fn force_entry_order(app: App, quote_id: String) -> ApiResult {
+    order_inner(app, OrderRequest { quote_id }, true).await
+}
+async fn order_inner(app: App, input: OrderRequest, require_unpaused: bool) -> ApiResult {
     if app.live_enabled {
         return Err(bad("paper endpoints disabled in live mode"));
     }
@@ -289,6 +295,13 @@ async fn order(State(app): State<App>, Json(input): Json<OrderRequest>) -> ApiRe
         .store
         .lock()
         .map_err(|_| error(StatusCode::INTERNAL_SERVER_ERROR, "store unavailable"))?;
+    if require_unpaused
+        && paper_cycle::settings_from_db(&store.db, &app)
+            .map_err(bad)?
+            .paused
+    {
+        return Err(bad("paper lifecycle paused"));
+    }
     if let Some(fill) = store
         .ledger
         .fills

@@ -105,6 +105,7 @@ mod tests {
             user_id: "owner".into(),
             conversation_id: "chat".into(),
             thread_id: None,
+            is_private: false,
             command: "preview".into(),
             arguments: vec!["buy".into(), "mint".into(), "1.000001USDC".into()],
         };

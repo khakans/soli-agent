@@ -84,6 +84,7 @@ def _command(raw_args, *, source=None, platform="", **kwargs):
     if source is None:
         return "Soli requires an authenticated native transport session."
     platform = platform or getattr(source, "platform", "")
+    platform = getattr(platform, "value", platform)
     thread = getattr(source, "thread_id", None)
     try:
         words = shlex.split(raw_args)
@@ -91,13 +92,16 @@ def _command(raw_args, *, source=None, platform="", **kwargs):
         return "Invalid command quoting; use /soli menu."
     if words and words[0] == "menu":
         return _run(["menu"])
+    is_private = _private(source, platform)
+    if words and words[0] == "force-entry" and not is_private:
+        return "Force-entry hanya tersedia di DM pribadi."
     if not words or words[0] in ("status", "lifecycle", "report", "wallet", "positions", "pnl", "position", "learning", "candidates") or words == ["settings"]:
         if words and words[0] == "candidates":
             words[0] = "live-candidates"
         return _display(_run(words or ["status"]))
     return _display(_run(["connector"], {"event_id":"native", "platform":getattr(platform,"value",platform),
         "user_id":str(getattr(source,"user_id","") or ""), "conversation_id":str(getattr(source,"chat_id","") or ""),
-        "thread_id":str(thread) if thread is not None else None,
+        "thread_id":str(thread) if thread is not None else None, "is_private":is_private,
         "command":words[0] if words else "status", "arguments":words[1:]}))
 
 

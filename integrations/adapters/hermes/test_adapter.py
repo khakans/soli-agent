@@ -63,6 +63,24 @@ class MenuTest(unittest.TestCase):
         self.check_menu("slack","D1","U1",True,owner=False)
         self.check_menu("slack","D1","U1",True,confirm="no")
 
+    def test_force_entry_requires_private_chat_and_marks_it(self):
+        shared = SimpleNamespace(platform="slack", chat_id="C1", user_id="U1", chat_type="channel")
+        with patch.object(adapter, "_run", return_value="{}") as run:
+            result = adapter._command("force-entry So11111111111111111111111111111111111111112", source=shared, platform="slack")
+        self.assertIn("DM pribadi", result)
+        run.assert_not_called()
+
+        private = SimpleNamespace(platform="slack", chat_id="D1", user_id="U1", chat_type="dm")
+        submitted = []
+        def run_private(args, payload=None):
+            if args == ["connector"]:
+                submitted.append(payload)
+                return "{}"
+            return "done"
+        with patch.object(adapter, "_run", side_effect=run_private):
+            adapter._command("force-entry So11111111111111111111111111111111111111112", source=private, platform="slack")
+        self.assertTrue(submitted[0]["is_private"])
+
     def test_headless_uses_plain_menu(self):
         with patch.object(adapter,"_run",return_value="commands"):
             self.assertEqual(adapter._menu(SimpleNamespace()),"commands")

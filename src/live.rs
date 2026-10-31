@@ -2652,6 +2652,7 @@ mod tests {
             user_id: "owner".into(),
             conversation_id: "channel".into(),
             thread_id: Some("thread-one".into()),
+            is_private: false,
             command: "preview".into(),
             arguments: vec!["buy".into(), m.mint.clone(), "1000000".into()],
         };

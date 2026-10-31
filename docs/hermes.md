@@ -30,6 +30,7 @@ Commands:
 /soli preview buy MINT USDC_ATOMIC_AMOUNT
 /soli preview sell MINT FULL_TOKEN_ATOMIC_AMOUNT
 /soli fill QUOTE_ID                       # paper only
+/soli force-entry MINT                    # paper only; private DM, skips signal/audit
 /soli approve ORDER_ID TRANSACTION_DIGEST # live only
 /soli halt
 /soli resume                             # live owner control
@@ -40,6 +41,7 @@ Commands:
 The native command handler receives adapter-derived `source`, including stable
 user/chat/thread IDs. Identity is never taken from model arguments. The general Rust connector HMAC-signs
 the context; Rust verifies timestamp, signature, replay ID and owner allowlist.
+For `force-entry`, Rust also requires the signed adapter-derived private-chat flag.
 Live approval must match the preview's original user/platform/chat/thread and
 transaction digest. The model tool `soli_read` only reads status/report.
 

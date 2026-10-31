@@ -25,6 +25,8 @@ pub struct Event {
     pub user_id: String,
     pub conversation_id: String,
     pub thread_id: Option<String>,
+    #[serde(default)]
+    pub is_private: bool,
     pub command: String,
     pub arguments: Vec<String>,
 }
@@ -199,6 +201,7 @@ fn command(e: &Event, live: bool) -> Result<(reqwest::Method, String, Option<Val
   ("settings",[action,field,value]) if action=="set" && (!live || field=="report-minutes")=>post("/v1/settings",json!({"field":field,"value":value})),
   ("lifecycle",[]) if !live=>get("/v1/lifecycle".into()),
   ("mode"|"pause"|"resume-cycle"|"force-close"|"close-all",args) if !live=>post("/v1/lifecycle/control",json!({"action":e.command,"args":args})),
+  ("force-entry",[mint]) if !live && e.is_private && soli_agent::valid_mint(mint) && mint!=soli_agent::USDC=>post("/v1/lifecycle/control",json!({"action":e.command,"args":e.arguments})),
   ("wallet"|"positions"|"pnl",[])=>get("/v1/wallet".into()),
   ("position",[mint]) if soli_agent::valid_mint(mint)=>get(format!("/v1/wallet/positions/{mint}")),
   ("learning",[])=>get("/v1/learning".into()),
@@ -214,7 +217,7 @@ fn command(e: &Event, live: bool) -> Result<(reqwest::Method, String, Option<Val
   ("approve",[id,digest]) if live=>post("/v1/owner-event",json!({"order_id":id,"digest":digest})),
   ("halt"|"resume"|"cancel"|"reconcile",[]) if live=>post("/v1/owner-event",json!({})),
   ("halt",[]) if !live=>post("/v1/halt",json!({"halted":true})),
-  _=>Err("commands: status | report | risk MINT | market MINT | preview buy/sell MINT ATOMIC_AMOUNT | fill QUOTE_ID (paper) | approve ORDER_ID DIGEST (live) | halt (paper)".into()),
+  _=>Err("commands: status | report | risk MINT | market MINT | force-entry MINT (paper) | preview buy/sell MINT ATOMIC_AMOUNT | fill QUOTE_ID (paper) | approve ORDER_ID DIGEST (live) | halt (paper)".into()),
  }
 }
 pub fn routes(security: Arc<Security>, token: String, live: bool) -> Router {
@@ -270,12 +273,56 @@ mod tests {
             user_id: "u".into(),
             conversation_id: "c".into(),
             thread_id: None,
+            is_private: false,
             command: "fill".into(),
             arguments: vec!["id".into()],
         };
         assert!(command(&e, false).is_ok());
         assert!(command(&e, true).is_err());
     }
+    #[test]
+    fn force_entry_is_routed_only_to_paper_controls_for_a_valid_mint() {
+        let mut e = Event {
+            event_id: "e".into(),
+            platform: "slack".into(),
+            user_id: "owner".into(),
+            conversation_id: "dm".into(),
+            thread_id: None,
+            is_private: true,
+            command: "force-entry".into(),
+            arguments: vec!["So11111111111111111111111111111111111111112".into()],
+        };
+        let (method, path, payload) = command(&e, false).unwrap();
+        assert_eq!(method, reqwest::Method::POST);
+        assert_eq!(path, "/v1/lifecycle/control");
+        assert_eq!(
+            payload.unwrap(),
+            json!({"action":"force-entry","args":e.arguments})
+        );
+        assert!(command(&e, true).is_err());
+        e.arguments.clear();
+        assert!(command(&e, false).is_err());
+    }
+
+    #[test]
+    fn force_entry_requires_signed_private_conversation_metadata() {
+        let event = |is_private| {
+            serde_json::from_value::<Event>(json!({
+                "event_id":"e",
+                "platform":"slack",
+                "user_id":"owner",
+                "conversation_id":"chat",
+                "thread_id":null,
+                "command":"force-entry",
+                "arguments":["So11111111111111111111111111111111111111112"],
+                "is_private":is_private
+            }))
+            .unwrap()
+        };
+        assert!(command(&event(false), false).is_err());
+        assert!(command(&event(true), false).is_ok());
+    }
+
     #[test]
     fn signed_identity_timestamp_and_replay_are_enforced() {
         for platform in [
@@ -299,6 +346,7 @@ mod tests {
                 user_id: "42".into(),
                 conversation_id: "123".into(),
                 thread_id: Some("9".into()),
+                is_private: false,
                 command: "status".into(),
                 arguments: vec![],
             };

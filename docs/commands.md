@@ -10,6 +10,13 @@ are `soli-agent wallet`, `position MINT`, `learning`, `report` and `live-candida
 Missing receipt history shows unavailable PnL; paper money is never presented
 as the real wallet balance. A wallet can hold tokens not managed by Soli.
 
+`/soli force-entry MINT` is a one-shot owner command in a private DM. It skips
+strategy signal screening, requests a fresh Jupiter quote, then fills the virtual
+ledger only if the normal quote and ledger risk checks pass. No token-safety audit
+or market signal check runs in this mode. It is paper-only;
+it does not bypass pause/halt, size/exposure limits, existing-position checks,
+slippage or impact controls, and it never enables live trading.
+
 `/soli-menu` opens grouped native choices: buttons on Slack, Telegram and Discord;
 numbered choices on WhatsApp and other text surfaces. Rust `menu-json` and MCP
 `soli_menu` structured content expose the same catalogue to other hosts. Headless
