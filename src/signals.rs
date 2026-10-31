@@ -131,7 +131,13 @@ pub fn init(app: &App) -> Result<(), String> {
 }
 
 pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
+    if crate::paper_cycle::paused(app) {
+        return Ok(());
+    }
     for wallet in &app.smart_wallets {
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let cursor = {
             let s = app.store.lock().map_err(|_| "store unavailable")?;
             s.db.query_row(
@@ -146,6 +152,9 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
         let mut signatures = vec![];
         let mut complete = false;
         for _ in 0..5 {
+            if crate::paper_cycle::paused(app) {
+                return Ok(());
+            }
             let mut options = json!({"limit":100,"commitment":"confirmed"});
             if let Some(before) = &before {
                 options["before"] = json!(before);
@@ -153,6 +162,9 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
             let page = data
                 .rpc("getSignaturesForAddress", json!([wallet, options]))
                 .await?;
+            if crate::paper_cycle::paused(app) {
+                return Ok(());
+            }
             let page = page.as_array().ok_or("missing signature history")?;
             if newest.is_none() {
                 newest = page
@@ -192,6 +204,9 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
                 "wallet backfill limit reached; entries paused until history catches up".into(),
             );
         }
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         if let Some(newest) = newest {
             let s = app.store.lock().map_err(|_| "store unavailable")?;
             for sig in signatures {
@@ -227,7 +242,13 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
         .collect::<Vec<_>>()
     };
     for (wallet, sig, queued) in queued {
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let tx=data.rpc("getTransaction",json!([sig,{"encoding":"jsonParsed","commitment":"confirmed","maxSupportedTransactionVersion":0}])).await?;
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         if tx.is_null() && now().saturating_sub(queued) < 120 {
             continue;
         }
@@ -283,6 +304,9 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
         .collect::<Vec<_>>()
     };
     for (mint, first) in candidates {
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let cooldown = {
             let s = app.store.lock().map_err(|_| "store unavailable")?;
             s.db.query_row(
@@ -319,7 +343,13 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
         }
         let mut still_holding = 0;
         for (wallet, b) in distinct.iter().take(10) {
+            if crate::paper_cycle::paused(app) {
+                return Ok(());
+            }
             let holdings=data.rpc("getTokenAccountsByOwner",json!([wallet,{"mint":mint},{"encoding":"jsonParsed","commitment":"confirmed"}])).await?;
+            if crate::paper_cycle::paused(app) {
+                return Ok(());
+            }
             let held = holdings["value"]
                 .as_array()
                 .ok_or("missing convergence holdings")?
@@ -337,8 +367,17 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
                 still_holding += 1;
             }
         }
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let screening = data.risk(&mint).await;
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let sample = data.sample(&mint).await;
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let accepted = still_holding >= 2
             && now().saturating_sub(first) <= 120
             && screening.as_ref().is_ok_and(|r| r.accepted)
@@ -398,6 +437,64 @@ pub async fn tick(app: &App, data: &Data) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[tokio::test]
+    async fn pause_all_stops_wallet_history_audits() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute_batch("CREATE TABLE paper_cycle(id INTEGER PRIMARY KEY,data TEXT);")
+            .unwrap();
+        let settings = crate::paper_cycle::Settings {
+            mode: "full".into(),
+            paused: true,
+            expires_at: u64::MAX,
+            entry_usdc: 1_000_000,
+        };
+        db.execute(
+            "INSERT INTO paper_cycle VALUES(1,?1)",
+            [serde_json::to_string(&settings).unwrap()],
+        )
+        .unwrap();
+        let http = reqwest::Client::new();
+        let app = App {
+            smart_wallets: vec!["wallet".into()],
+            entry_trigger: "wallet_convergence".into(),
+            data: None,
+            strategy: crate::research::Strategy::default(),
+            watchlist: vec![],
+            auto_paper: false,
+            live_enabled: false,
+            store: std::sync::Arc::new(std::sync::Mutex::new(crate::Store {
+                db,
+                ledger: soli_agent::Ledger::new(100_000_000).unwrap(),
+                previews: Default::default(),
+            })),
+            http: http.clone(),
+            token: String::new(),
+            jupiter_key: None,
+            fee: 0,
+        };
+        init(&app).unwrap();
+        let data = Data {
+            jupiter_url: String::new(),
+            http,
+            rpc: "http://127.0.0.1:1".into(),
+            jupiter_key: String::new(),
+            goplus: crate::goplus::Auth::from_env(),
+        };
+
+        tick(&app, &data).await.unwrap();
+
+        assert_eq!(
+            app.store
+                .lock()
+                .unwrap()
+                .db
+                .query_row("SELECT COUNT(*) FROM wallet_cursors", [], |r| r
+                    .get::<_, u64>(0))
+                .unwrap(),
+            0
+        );
+    }
+
     #[test]
     fn transfers_and_unsigned_wallets_are_not_buy_signals() {
         let tx = json!({"blockTime":100,"meta":{"err":null},"transaction":{"message":{"accountKeys":[{"pubkey":"w","signer":false}],"instructions":[]}}});

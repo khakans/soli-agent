@@ -459,15 +459,26 @@ pub fn start(app: App) {
             let mut calibration_due = 0;
             loop {
                 clock.tick().await;
+                if crate::paper_cycle::paused(&mark_app) {
+                    continue;
+                }
                 if now() >= calibration_due {
                     let _ = calibrate(State(mark_app.clone())).await;
                     calibration_due = now() + 3600;
                 }
+                if crate::paper_cycle::paused(&mark_app) {
+                    continue;
+                }
                 if let Err(reason) = mark_and_exits(&mark_app, &mark_data).await {
                     event(&mark_app, "mark_failed", json!({"reason":reason}));
                 }
+                if crate::paper_cycle::paused(&mark_app) {
+                    continue;
+                }
                 if let Ok(Json(summary)) = report(State(mark_app.clone())).await
                     && let Ok(s) = mark_app.store.lock()
+                    && !crate::paper_cycle::settings_from_db(&s.db, &mark_app)
+                        .map_or(true, |cycle| cycle.paused)
                 {
                     let _ = s.db.execute(
                         "INSERT OR REPLACE INTO daily_reports VALUES(?1,?2,?3)",
@@ -493,12 +504,24 @@ pub fn effective_entry_trigger(configured: &str, has_smart_wallets: bool) -> &st
 }
 
 async fn tick(app: &App, data: &Data) -> Result<(), String> {
+    if crate::paper_cycle::paused(app) {
+        return Ok(());
+    }
     let _ = crate::learning::review(app, true).await;
+    if crate::paper_cycle::paused(app) {
+        return Ok(());
+    }
     let entry_trigger = effective_entry_trigger(&app.entry_trigger, !app.smart_wallets.is_empty());
     if entry_trigger == "wallet_convergence" {
         crate::signals::tick(app, data).await?;
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
     }
     for mint in &app.watchlist {
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let sample = match data.sample(mint).await {
             Ok(s) => s,
             Err(e) => {
@@ -506,13 +529,22 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
                 continue;
             }
         };
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         let old = old_sample(app, mint, sample.timestamp);
         save_sample(app, &sample)?;
         if old
             .as_ref()
             .is_some_and(|old| app.strategy.entry(old, &sample, now()))
         {
+            if crate::paper_cycle::paused(app) {
+                return Ok(());
+            }
             let risk = data.risk(mint).await?;
+            if crate::paper_cycle::paused(app) {
+                return Ok(());
+            }
             event(
                 app,
                 "entry_signal",
@@ -536,6 +568,9 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
                 )
                 .await;
                 if let Ok(Json(q)) = q {
+                    if crate::paper_cycle::paused(app) {
+                        return Ok(());
+                    }
                     let id = q["preview"]["id"].as_str().ok_or("missing preview id")?;
                     let _ = super::order(
                         State(app.clone()),
@@ -551,7 +586,7 @@ async fn tick(app: &App, data: &Data) -> Result<(), String> {
     Ok(())
 }
 async fn mark_and_exits(app: &App, data: &Data) -> Result<(), String> {
-    if app.live_enabled {
+    if app.live_enabled || crate::paper_cycle::paused(app) {
         return Ok(());
     } // Live automation belongs to the isolated signer's owner-authorized worker.
     let ledger = {
@@ -564,8 +599,14 @@ async fn mark_and_exits(app: &App, data: &Data) -> Result<(), String> {
     let mut liquidation = 0u64;
     let mut complete = true;
     for (mint, position) in &ledger.positions {
+        if crate::paper_cycle::paused(app) {
+            return Ok(());
+        }
         match data.quote(mint, USDC, position.amount).await {
             Ok(q) => {
+                if crate::paper_cycle::paused(app) {
+                    return Ok(());
+                }
                 let credit = amount_field(&q, "otherAmountThreshold")?.saturating_sub(fee(app));
                 liquidation = liquidation.checked_add(credit).ok_or("equity overflow")?;
                 let entry = ledger
@@ -578,6 +619,9 @@ async fn mark_and_exits(app: &App, data: &Data) -> Result<(), String> {
                     app.strategy
                         .exit(position.cost_usdc, credit, now().saturating_sub(entry))
                 {
+                    if crate::paper_cycle::paused(app) {
+                        return Ok(());
+                    }
                     event(
                         app,
                         "exit_signal",
@@ -623,6 +667,9 @@ async fn mark_and_exits(app: &App, data: &Data) -> Result<(), String> {
         .ok_or("equity overflow")?;
     {
         let mut store = app.store.lock().map_err(|_| "store unavailable")?;
+        if crate::paper_cycle::settings_from_db(&store.db, app).map_or(true, |cycle| cycle.paused) {
+            return Ok(());
+        }
         // Do not mix quotes from a previous position set with a newly filled ledger.
         if serde_json::to_string(&store.ledger.fills).unwrap()
             == serde_json::to_string(&ledger.fills).unwrap()

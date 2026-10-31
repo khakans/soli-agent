@@ -34,6 +34,9 @@ pub(crate) fn settings_from_db(db: &rusqlite::Connection, app: &App) -> Result<S
         }),
     }
 }
+pub fn paused(app: &App) -> bool {
+    settings(app).map_or(true, |s| s.paused)
+}
 pub fn entry(app: &App) -> bool {
     settings(app).is_ok_and(|s| !s.paused && s.mode == "full" && s.expires_at > crate::now())
 }
@@ -219,6 +222,21 @@ mod tests {
 
     fn error_text(result: ApiResult) -> String {
         result.unwrap_err().1.0["error"].as_str().unwrap().into()
+    }
+
+    #[test]
+    fn pause_state_disables_automation_and_fails_closed() {
+        assert!(paused(&app(true, false)));
+        assert!(!paused(&app(false, false)));
+        let unavailable = app(false, false);
+        unavailable
+            .store
+            .lock()
+            .unwrap()
+            .db
+            .execute("UPDATE paper_cycle SET data='invalid' WHERE id=1", [])
+            .unwrap();
+        assert!(paused(&unavailable));
     }
 
     #[tokio::test]

@@ -54,6 +54,23 @@ pub fn schedule(db: &Connection) -> Result<Value, String> {
     )
     .map_err(|_| "notification schedule unavailable".into())
 }
+fn may_deliver(payload: &Value, paused: bool) -> bool {
+    !paused
+        || !matches!(
+            payload["kind"].as_str(),
+            Some("lifecycle_report" | "daily_report")
+        )
+}
+fn cancel_automatic_reports(db: &Connection, paused: bool) -> Result<(), String> {
+    if paused {
+        db.execute(
+            "UPDATE outbox SET attempts=12,last_error='discarded while automation paused' WHERE delivered_at IS NULL AND json_extract(data,'$.kind') IN ('lifecycle_report','daily_report')",
+            [],
+        )
+        .map_err(|_| "paused report cancellation failed")?;
+    }
+    Ok(())
+}
 pub fn set_schedule(db: &Connection, value: &str) -> Result<Value, String> {
     let minutes = if value == "off" {
         0
@@ -85,6 +102,7 @@ fn periodic(
     stamp: u64,
     data: &Value,
     configured: &[Target],
+    paused: bool,
 ) -> Result<(), String> {
     let tx = db
         .unchecked_transaction()
@@ -96,7 +114,7 @@ fn periodic(
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map_err(|_| "notification schedule unavailable")?;
-    if minutes > 0 && stamp >= next && !configured.is_empty() {
+    if !paused && minutes > 0 && stamp >= next && !configured.is_empty() {
         for target in configured {
             enqueue_target(
                 &tx,
@@ -258,8 +276,12 @@ pub fn start(app: App) {
         let mut interval = tokio::time::interval(Duration::from_secs(10));
         loop {
             interval.tick().await;
+            let paused = crate::paper_cycle::paused(&app);
             let pending = {
                 let Ok(s) = app.store.lock() else { continue };
+                if cancel_automatic_reports(&s.db, paused).is_err() {
+                    continue;
+                }
                 let Ok(mut q)=s.db.prepare("SELECT id,target,data,attempts FROM outbox WHERE delivered_at IS NULL AND attempts<12 AND next_at<=?1 ORDER BY next_at LIMIT 10") else {continue};
                 let Ok(rows) = q.query_map([now()], |r| {
                     Ok((
@@ -289,6 +311,12 @@ pub fn start(app: App) {
                                 })
                             }) =>
                         {
+                            if !may_deliver(&v, crate::paper_cycle::paused(&app)) {
+                                if let Ok(s) = app.store.lock() {
+                                    let _ = cancel_automatic_reports(&s.db, true);
+                                }
+                                continue;
+                            }
                             deliver(&app.http, &t, &v, &secret).await
                         }
                         _ => Err("notification target removed or secret unavailable".into()),
@@ -310,25 +338,76 @@ pub fn start(app: App) {
                     }
                 }
             }
-            if let Ok(axum::Json(report)) =
-                crate::research::report(axum::extract::State(app.clone())).await
-                && let Ok(axum::Json(status)) =
-                    crate::status(axum::extract::State(app.clone())).await
-                && let Ok(s) = app.store.lock()
-            {
-                let latest_sample: Option<u64> =
-                    s.db.query_row("SELECT MAX(ts) FROM samples", [], |r| r.get(0))
-                        .ok()
-                        .flatten();
-                if let Err(e) = targets().and_then(|t| {
-                    periodic(
-                        &s.db,
-                        now(),
-                        &json!({"status":status,"report":report,"latest_sample_at":latest_sample}),
-                        &t,
-                    )
-                }) {
-                    eprintln!("Lifecycle notification: {e}");
+            let report_snapshot = if !crate::paper_cycle::paused(&app) || app.live_enabled {
+                match (
+                    crate::research::report(axum::extract::State(app.clone())).await,
+                    crate::status(axum::extract::State(app.clone())).await,
+                ) {
+                    (Ok(axum::Json(report)), Ok(axum::Json(status))) => Some((report, status)),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if let Ok(s) = app.store.lock() {
+                let report_paused = crate::paper_cycle::settings_from_db(&s.db, &app)
+                    .map_or(true, |cycle| cycle.paused);
+                if let Some((report, status)) = report_snapshot {
+                    if !report_paused {
+                        let latest_sample: Option<u64> =
+                            s.db.query_row("SELECT MAX(ts) FROM samples", [], |r| r.get(0))
+                                .ok()
+                                .flatten();
+                        if let Err(e) = targets().and_then(|t| {
+                            periodic(
+                                &s.db,
+                                now(),
+                                &json!({"status":status,"report":report,"latest_sample_at":latest_sample}),
+                                &t,
+                                false,
+                            )
+                        }) {
+                            eprintln!("Lifecycle notification: {e}");
+                        }
+                        let day = now() / 86400;
+                        let previous: Option<String> =
+                            s.db.query_row(
+                                "SELECT data FROM daily_reports WHERE day=?1",
+                                [day.saturating_sub(1)],
+                                |r| r.get(0),
+                            )
+                            .ok();
+                        if let Some(old) =
+                            previous.and_then(|v| serde_json::from_str::<Value>(&v).ok())
+                        {
+                            let _ =
+                                enqueue(&s.db, &format!("daily:{}", day - 1), "daily_report", &old);
+                        }
+                    }
+                    if let Some(positions) = report["live"]["marks"]["positions"].as_array() {
+                        for p in positions
+                            .iter()
+                            .filter(|p| p["exit_recommendation"].is_string())
+                        {
+                            let _ = enqueue(
+                                &s.db,
+                                &format!(
+                                    "live-exit:{}:{}:{}",
+                                    p["mint"],
+                                    p["exit_recommendation"],
+                                    now() / 1800
+                                ),
+                                "live_exit_recommendation",
+                                p,
+                            );
+                        }
+                    }
+                    if let Some(completed) = report["live"]["completed_order_sample"].as_array() {
+                        for order in completed {
+                            let key = format!("live-receipt:{}", order);
+                            let _ = enqueue(&s.db, &key, "live_receipt", order);
+                        }
+                    }
                 }
                 let since =
                     s.db.query_row(
@@ -349,42 +428,6 @@ pub fn start(app: App) {
                         &json!(fill),
                     );
                 }
-                // Send the completed prior UTC day's persisted snapshot once, including after downtime.
-                let day = now() / 86400;
-                let previous: Option<String> =
-                    s.db.query_row(
-                        "SELECT data FROM daily_reports WHERE day=?1",
-                        [day.saturating_sub(1)],
-                        |r| r.get(0),
-                    )
-                    .ok();
-                if let Some(old) = previous.and_then(|v| serde_json::from_str::<Value>(&v).ok()) {
-                    let _ = enqueue(&s.db, &format!("daily:{}", day - 1), "daily_report", &old);
-                }
-                if let Some(positions) = report["live"]["marks"]["positions"].as_array() {
-                    for p in positions
-                        .iter()
-                        .filter(|p| p["exit_recommendation"].is_string())
-                    {
-                        let _ = enqueue(
-                            &s.db,
-                            &format!(
-                                "live-exit:{}:{}:{}",
-                                p["mint"],
-                                p["exit_recommendation"],
-                                now() / 1800
-                            ),
-                            "live_exit_recommendation",
-                            p,
-                        );
-                    }
-                }
-                if let Some(completed) = report["live"]["completed_order_sample"].as_array() {
-                    for order in completed {
-                        let key = format!("live-receipt:{}", order);
-                        let _ = enqueue(&s.db, &key, "live_receipt", order);
-                    }
-                }
             }
         }
     });
@@ -393,6 +436,65 @@ pub fn start(app: App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn report_selected_before_pause_is_suppressed_at_delivery_time() {
+        let stale_report = json!({"kind":"lifecycle_report"});
+        let alert = json!({"kind":"exit_signal"});
+        assert!(!may_deliver(&stale_report, true));
+        assert!(may_deliver(&alert, true));
+    }
+
+    #[test]
+    fn paused_automation_cancels_pending_reports_and_skips_new_periodic_reports() {
+        let db = Connection::open_in_memory().unwrap();
+        schema(&db).unwrap();
+        set_schedule(&db, "60").unwrap();
+        let target = Target {
+            id: "dm".into(),
+            kind: "slack".into(),
+            destination: "D1".into(),
+            secret_env: "TEST_ONLY".into(),
+        };
+        enqueue_target(
+            &db,
+            &target,
+            "old-lifecycle",
+            "lifecycle_report",
+            &json!({}),
+        )
+        .unwrap();
+        enqueue_target(&db, &target, "old-daily", "daily_report", &json!({})).unwrap();
+        enqueue_target(&db, &target, "alert", "exit_signal", &json!({})).unwrap();
+
+        cancel_automatic_reports(&db, true).unwrap();
+        periodic(
+            &db,
+            now() + 3600,
+            &json!({}),
+            std::slice::from_ref(&target),
+            true,
+        )
+        .unwrap();
+
+        assert_eq!(
+            db.query_row("SELECT COUNT(*) FROM outbox WHERE attempts<12", [], |r| r
+                .get::<_, u64>(
+                0
+            ))
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            db.query_row(
+                "SELECT json_extract(data,'$.kind') FROM outbox WHERE attempts<12",
+                [],
+                |r| r.get::<_, String>(0),
+            )
+            .unwrap(),
+            "exit_signal"
+        );
+    }
+
     #[test]
     fn schedule_survives_restart_coalesces_downtime_and_can_be_disabled() {
         let file = tempfile::NamedTempFile::new().unwrap();
@@ -409,19 +511,33 @@ mod tests {
         };
         let schedule = set_schedule(&db, "60").unwrap();
         let stamp = schedule["next_at"].as_u64().unwrap();
-        periodic(&db, stamp, &json!({}), &[]).unwrap();
+        periodic(&db, stamp, &json!({}), &[], false).unwrap();
         assert_eq!(super::schedule(&db).unwrap()["next_at"], stamp);
-        periodic(&db, stamp, &json!({}), std::slice::from_ref(&t)).unwrap();
+        periodic(&db, stamp, &json!({}), std::slice::from_ref(&t), false).unwrap();
         drop(db);
         let db = Connection::open(file.path()).unwrap();
         schema(&db).unwrap();
-        periodic(&db, stamp + 3599, &json!({}), std::slice::from_ref(&t)).unwrap();
+        periodic(
+            &db,
+            stamp + 3599,
+            &json!({}),
+            std::slice::from_ref(&t),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, u64>(0))
                 .unwrap(),
             1
         );
-        periodic(&db, stamp + 86400, &json!({}), std::slice::from_ref(&t)).unwrap();
+        periodic(
+            &db,
+            stamp + 86400,
+            &json!({}),
+            std::slice::from_ref(&t),
+            false,
+        )
+        .unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, u64>(0))
                 .unwrap(),
@@ -440,7 +556,7 @@ mod tests {
             .unwrap(),
             0
         );
-        periodic(&db, stamp + 172800, &json!({}), &[t]).unwrap();
+        periodic(&db, stamp + 172800, &json!({}), &[t], false).unwrap();
         assert_eq!(
             db.query_row("SELECT COUNT(*) FROM outbox", [], |r| r.get::<_, u64>(0))
                 .unwrap(),
